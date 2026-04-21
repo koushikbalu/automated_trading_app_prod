@@ -1,0 +1,130 @@
+# ---- Strategy Rules ----
+strategy:
+  universe_file: "universe.csv"        # ticker, sector columns
+  benchmark: "NSE:NIFTY 200"
+  momentum_benchmark: "NSE:NIFTY200 MOMENTUM 30"
+  top_liquid_n: 120
+  top_momentum_n: 10
+  min_price: 50.0
+  momentum_weights: [0.25, 0.40, 0.25, 0.10]  # 12-1M, 6M, 3M, 1M blend
+  continuity_bonus: 0.3                        # score boost for stocks already held
+  sector_downtrend_penalty: 1.0                # 1.0 = disabled; <1.0 penalizes sectors with negative median momentum
+  max_vol_percentile: 1.0                      # 1.0 = disabled; <1.0 excludes top-N% most volatile stocks
+
+# ---- Regime Filter ----
+regime:
+  breadth_threshold: 0.30              # % stocks > 200DMA for full risk-on
+  neutral_breadth_threshold: 0.25      # for neutral tier
+  neutral_allocation_pct: 0.70
+  require_bench_above_200dma: true
+  require_golden_cross: true           # 50DMA > 200DMA
+  require_positive_3m_return: false    # disabled — catch V-shaped recoveries faster
+
+# ---- Position Sizing ----
+sizing:
+  method: "inverse_volatility"
+  max_weight_per_stock: 0.18
+  min_weight_per_stock: 0.04          # drop positions below 4%
+  score_blend: 0.4                    # 40% score-rank, 60% inv-vol
+  max_sector_weight: 0.25
+  volatility_lookback_days: 60
+
+# ---- Exit Rules ----
+exits:
+  use_atr_trailing_stop: true
+  atr_window: 14
+  atr_multiple: 2.0
+  max_loss_pct: -0.08                 # hard 8% stop from entry
+  max_hold_losing_days: 5             # exit if underwater 5 consecutive days
+  stop_exit_slippage: 0.005           # 0.5% extra slippage on stop-triggered exits
+  use_50dma_exit: false
+
+# ---- Pyramiding ----
+pyramid:
+  enabled: true
+  threshold_pct: 0.03                 # add if position is up 3%+ from entry
+  add_pct: 0.03                       # add 3pp weight each pyramid
+  max_pyramids: 2                     # max 2 adds per position per holding
+  ratchet_stop_to_breakeven: true     # raise stop to entry after pyramid
+
+# ---- Risk Management ----
+risk:
+  drawdown_circuit_breaker: -0.20      # trigger at -20%
+  cb_reset_days: 1                     # 1 = instant reset (original behavior)
+  min_exposure: 0.30                   # floor
+  min_exposure_slots: 3
+  re_entry_enabled: true               # allow re-entry after stop-out
+
+# ---- Costs ----
+costs:
+  one_way_brokerage: 0.0003            # Zerodha: flat per-order, model as %
+  stt_sell_side: 0.001                 # STT on delivery sell
+  gst_rate: 0.18
+  stamp_duty_buy: 0.00015
+  slippage_estimate: 0.001
+
+# ---- Capital ----
+capital:
+  initial: 20000000
+  annual_addition: 0
+  addition_month: 4
+  cash_yield: 0.04
+
+# ---- Schedule ----
+schedule:
+  rebalance_time: "15:45"              # after market close
+  stop_monitor_interval_minutes: 5
+  re_entry_check_time: "15:20"
+  pyramid_check_time: "15:00"
+  token_refresh_time: "09:10"
+  daily_summary_time: "16:00"
+  market_open: "09:15"
+  market_close: "15:30"
+  rebalance_day: "last_trading_day"    # of each month
+  weekly_report_time: "10:00"          # Saturday morning
+  weekly_report_day: "sat"
+  monthly_report_time: "10:00"         # 1st of each month
+  monthly_report_day: 1
+  yearly_report_time: "10:00"          # Jan 1
+  yearly_report_month: 1
+  yearly_report_day: 1
+
+# ---- Broker (Zerodha Kite Connect) ----
+broker:
+  api_key: "${KITE_API_KEY}"           # from env vars
+  api_secret: "${KITE_API_SECRET}"
+  access_token_file: "kite_token.json"
+  exchange: "NSE"
+  product_type: "CNC"                  # delivery
+  order_type: "MARKET"                 # or LIMIT
+  limit_buffer_pct: 0.002              # for LIMIT orders: price + 0.2%
+  dry_run: true                        # paper trading by default
+
+# ---- Notifications ----
+notifications:
+  telegram:
+    bot_token: "${TELEGRAM_BOT_TOKEN}"
+    chat_id: "${TELEGRAM_CHAT_ID}"
+    send_on:
+      - signal_generated
+      - order_placed
+      - order_filled
+      - stop_triggered
+      - re_entry
+      - circuit_breaker
+      - daily_summary
+      - token_expiry
+      - error
+
+# ---- Persistence ----
+persistence:
+  database_url: "${DATABASE_URL}"      # postgresql://user:pass@host:5432/db
+  trade_log_path: "trades/"
+  daily_snapshot_path: "snapshots/"
+
+# ---- Logging ----
+logging:
+  level: "INFO"
+  file: "automated_trading.log"
+  max_size_mb: 50
+  backup_count: 5

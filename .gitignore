@@ -1,0 +1,10 @@
+.env
+kite_token.json
+*.db
+cache/
+trades/
+snapshots/
+*.log
+__pycache__/
+*.pyc
+.venv/
