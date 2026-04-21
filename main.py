@@ -310,7 +310,7 @@ def history(limit: int = 20):
 
 
 @app.command()
-def token(request_token: str = typer.Option("", help="Request token from Kite login")):
+def token(request_token: str = typer.Option(None, help="Request token from Kite login")):
     """Manual Kite token refresh."""
     _setup_logging()
     from token_manager import TokenManager
@@ -332,7 +332,7 @@ def token(request_token: str = typer.Option("", help="Request token from Kite lo
 @app.command()
 def report(
     period: str = typer.Argument(..., help="Report period: weekly, monthly, or yearly"),
-    date: str = typer.Option("", help="Reference date (YYYY-MM-DD). Defaults to today."),
+    date: str = typer.Option(None, help="Reference date (YYYY-MM-DD). Defaults to today."),
     send: bool = typer.Option(False, help="Also send the report via Telegram"),
 ):
     """Generate a trading report in Excel format."""
