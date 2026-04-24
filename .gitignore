@@ -1,6 +1,7 @@
 # Secrets
 .env
 kite_token.json
+config.yaml
 
 # Database
 *.db

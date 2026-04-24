@@ -71,6 +71,7 @@ def run():
     from apscheduler.schedulers.blocking import BlockingScheduler
     from apscheduler.triggers.cron import CronTrigger
     from apscheduler.executors.pool import ThreadPoolExecutor
+    from apscheduler.events import EVENT_JOB_ERROR
 
     from engine import TradingEngine
 
@@ -195,6 +196,14 @@ def run():
         id="yearly_report",
         name="Yearly report",
     )
+
+    def _job_error_listener(event):
+        logger.error("Scheduled job '%s' failed: %s", event.job_id, event.exception)
+        engine.notifier.notify_error(
+            f"Scheduled job '{event.job_id}' failed: {event.exception}"
+        )
+
+    scheduler.add_listener(_job_error_listener, EVENT_JOB_ERROR)
 
     logger.info("Scheduler configured with %d jobs", len(scheduler.get_jobs()))
     for job in scheduler.get_jobs():

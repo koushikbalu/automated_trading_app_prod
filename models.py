@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from enum import Enum
 from typing import Optional
 
@@ -44,6 +44,7 @@ class Position:
     sector: str = "Other"
     losing_days: int = 0
     pyramid_count: int = 0
+    last_losing_check: Optional[date] = None
 
 
 @dataclass

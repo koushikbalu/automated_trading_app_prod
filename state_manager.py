@@ -20,6 +20,7 @@ from pathlib import Path
 from sqlalchemy import (
     Boolean,
     Column,
+    Date,
     DateTime,
     Float,
     Integer,
@@ -58,6 +59,7 @@ class PositionRow(Base):
     status = Column(String(16), nullable=False, default="open")
     losing_days = Column(Integer, nullable=False, default=0)
     pyramid_count = Column(Integer, nullable=False, default=0)
+    last_losing_check = Column(Date, nullable=True)
 
 
 class TradeRow(Base):
@@ -149,7 +151,10 @@ class StateManager:
 
     def __init__(self, db_url: str | None = None):
         url = db_url or _resolve_db_url()
-        self.engine = create_engine(url, echo=False, pool_size=5, max_overflow=10, pool_pre_ping=True)
+        engine_kwargs: dict = {"echo": False, "pool_pre_ping": True}
+        if not url.startswith("sqlite"):
+            engine_kwargs.update(pool_size=5, max_overflow=10)
+        self.engine = create_engine(url, **engine_kwargs)
         Base.metadata.create_all(self.engine)
         self._Session = sessionmaker(bind=self.engine)
 
@@ -185,6 +190,7 @@ class StateManager:
                     sector=r.sector,
                     losing_days=r.losing_days or 0,
                     pyramid_count=r.pyramid_count or 0,
+                    last_losing_check=r.last_losing_check,
                 )
                 for r in rows
             }
@@ -202,6 +208,7 @@ class StateManager:
                 existing.status = "open"
                 existing.losing_days = pos.losing_days
                 existing.pyramid_count = pos.pyramid_count
+                existing.last_losing_check = pos.last_losing_check
             else:
                 s.add(PositionRow(
                     ticker=pos.ticker,
@@ -214,6 +221,7 @@ class StateManager:
                     status="open",
                     losing_days=pos.losing_days,
                     pyramid_count=pos.pyramid_count,
+                    last_losing_check=pos.last_losing_check,
                 ))
             s.commit()
 
@@ -238,6 +246,13 @@ class StateManager:
 
     def record_trade(self, trade: TradeRecord) -> None:
         with self._session() as s:
+            if trade.order_id:
+                existing = s.query(TradeRow).filter(
+                    TradeRow.order_id == trade.order_id
+                ).first()
+                if existing:
+                    logger.info("Trade already recorded for order_id=%s, skipping", trade.order_id)
+                    return
             s.add(TradeRow(
                 date=trade.date,
                 ticker=trade.ticker,

@@ -18,7 +18,6 @@ from fastapi.responses import FileResponse, HTMLResponse
 from engine import TradingEngine
 from token_manager import TokenManager
 from report_generator import generate_report
-from state_manager import StateManager
 
 logger = logging.getLogger(__name__)
 
@@ -73,20 +72,21 @@ def health():
 def status():
     """Current portfolio value, positions, exposure, regime."""
     engine = _get_engine()
+    engine.reload_from_db()
     return engine.get_status()
 
 
 @app.get("/trades", dependencies=[Depends(verify_token)])
 def trades(limit: int = Query(50, ge=1, le=500, description="Number of recent trades")):
     """Recent trade history."""
-    sm = StateManager()
-    return sm.get_recent_trades(limit)
+    return _get_engine().state.get_recent_trades(limit)
 
 
 @app.get("/stops", dependencies=[Depends(verify_token)])
 def stops():
     """Current stop levels for all open positions."""
     engine = _get_engine()
+    engine.reload_from_db()
     return engine.get_stops()
 
 
@@ -98,6 +98,7 @@ def rebalance(background_tasks: BackgroundTasks):
     Check /status or Telegram for results.
     """
     engine = _get_engine()
+    engine.reload_from_db()
     if engine.state.has_rebalanced_today():
         raise HTTPException(status_code=409, detail="Rebalance already executed today")
     background_tasks.add_task(engine.force_rebalance)
@@ -169,8 +170,7 @@ async def kite_webhook(request: Request):
         filled_qty = body.get("filled_quantity", 0)
 
         if order_id and status:
-            sm = StateManager()
-            sm.update_trade_fill_status(order_id, status, filled_qty)
+            _get_engine().state.update_trade_fill_status(order_id, status, filled_qty)
             logger.info("Webhook: order %s -> %s (filled=%d)", order_id, status, filled_qty)
 
         return {"status": "processed"}
@@ -187,8 +187,7 @@ async def kite_webhook(request: Request):
 
 def _report_response(period: str, ref_date: Optional[str], background_tasks: BackgroundTasks) -> FileResponse:
     reference = date.fromisoformat(ref_date) if ref_date else None
-    sm = StateManager()
-    path = generate_report(period, reference_date=reference, state_manager=sm)
+    path = generate_report(period, reference_date=reference, state_manager=_get_engine().state)
     background_tasks.add_task(path.unlink, missing_ok=True)
     return FileResponse(
         path,

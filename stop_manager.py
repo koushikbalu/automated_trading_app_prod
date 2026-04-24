@@ -113,13 +113,12 @@ def check_all_stops(
                 reason = f"Hard stop ({max_loss_pct:.0%})"
 
         today = _date_type.today()
-        last_check = getattr(pos, "_last_losing_check", None)
-        if last_check != today:
+        if pos.last_losing_check != today:
             if price < pos.entry_price:
                 pos.losing_days += 1
             else:
                 pos.losing_days = 0
-            pos._last_losing_check = today
+            pos.last_losing_check = today
 
         if max_losing_days > 0 and not triggered and pos.losing_days >= max_losing_days:
             triggered = True

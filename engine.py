@@ -18,7 +18,7 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
-from constants import BROAD_UNIVERSE, SECTOR_MAP
+from constants import BROAD_UNIVERSE, SECTOR_MAP, load_universe
 from data_manager import fetch_historical, fetch_historical_bulk, get_kite, get_live_quotes
 from models import (
     OrderAction,
@@ -59,7 +59,8 @@ class TradingEngine:
     def __init__(self, cfg: dict | None = None):
         self.cfg = cfg or _load_config()
         self._lock = threading.RLock()
-        self.state = StateManager()
+        db_url = self.cfg.get("persistence", {}).get("database_url")
+        self.state = StateManager(db_url=db_url)
         self.notifier = TelegramNotifier()
         self.order_mgr = OrderManager(self.cfg, notifier=self.notifier)
         self.token_mgr = TokenManager()
@@ -402,6 +403,8 @@ class TradingEngine:
         self._recalc_available_cash()
         self.state.update_position_prices(live_prices)
         self._last_stop_check = datetime.now()
+        if exits:
+            self._save_snapshot()
 
     # ------------------------------------------------------------------
     # check_re_entry  (15:20 IST)
@@ -490,7 +493,8 @@ class TradingEngine:
         self._reconcile_positions()
         logger.info("Running monthly rebalance...")
 
-        all_tickers = BROAD_UNIVERSE.copy()
+        universe_tickers, universe_sectors = load_universe()
+        all_tickers = universe_tickers.copy()
         bench_sym = self.cfg.get("strategy", {}).get("benchmark", "NIFTY 200").replace("NSE:", "")
 
         data = fetch_historical_bulk(
@@ -581,7 +585,7 @@ class TradingEngine:
         dma_200 = sma(stocks_close, 200)
         self._last_ranked = score_and_rank(
             stocks_close, stocks_volume, vol_60, adv,
-            dma_100, dma_200, SECTOR_MAP, self.cfg,
+            dma_100, dma_200, universe_sectors, self.cfg,
         )
 
         exposure_signals = self._validate_signals(
@@ -817,7 +821,8 @@ class TradingEngine:
 
         logger.info("Refreshing momentum rankings (stale or empty)...")
         try:
-            all_tickers = BROAD_UNIVERSE.copy()
+            universe_tickers, universe_sectors = load_universe()
+            all_tickers = universe_tickers.copy()
             bench_sym = self.cfg.get("strategy", {}).get("benchmark", "NIFTY 200").replace("NSE:", "")
             data = fetch_historical_bulk(all_tickers + [bench_sym], days=400, benchmark_col=bench_sym)
             if not data or data["close"].empty:
@@ -837,7 +842,7 @@ class TradingEngine:
 
             self._last_ranked = score_and_rank(
                 stocks_close, stocks_volume, vol_60, adv,
-                dma_100, dma_200, SECTOR_MAP, self.cfg,
+                dma_100, dma_200, universe_sectors, self.cfg,
             )
             self._last_ranked_date = datetime.now()
             logger.info("Rankings refreshed: %d stocks scored", len(self._last_ranked))
@@ -856,6 +861,24 @@ class TradingEngine:
             return
         with self._lock:
             self._execute_rebalance()
+
+    def reload_from_db(self) -> None:
+        """Refresh in-memory state from the database.
+
+        Used by the API container to stay in sync with the scheduler's
+        writes without sharing a process.
+        """
+        with self._lock:
+            snap = self.state.load_latest_portfolio_state()
+            if snap:
+                self.portfolio_value = snap.portfolio_value
+                self.portfolio_peak = snap.portfolio_peak
+                self.circuit_breaker.active = snap.circuit_breaker_active
+            self.positions = self.state.load_positions()
+            self.stopped_out = self.state.load_stopped_out_this_month()
+            self.available_cash = self.portfolio_value - sum(
+                p.weight * self.portfolio_value for p in self.positions.values()
+            )
 
     def get_health(self) -> dict:
         """Return health metrics for the /health endpoint."""

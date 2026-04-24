@@ -44,6 +44,16 @@ else
   echo "Swap already exists, skipping."
 fi
 
+echo "=== 3.5/5  Config file ==="
+if [ ! -f "$APP_DIR/config.yaml" ]; then
+  if [ -f "$APP_DIR/config.yaml.example" ]; then
+    cp "$APP_DIR/config.yaml.example" "$APP_DIR/config.yaml"
+    echo "config.yaml created from config.yaml.example -- review and customise."
+  else
+    echo "WARNING: No config.yaml or config.yaml.example found."
+  fi
+fi
+
 echo "=== 4/5  Alembic migrations ==="
 if [ ! -f "$APP_DIR/.env" ]; then
   echo "ERROR: $APP_DIR/.env not found."

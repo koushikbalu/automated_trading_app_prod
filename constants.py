@@ -1,5 +1,48 @@
 """Stock universe, sector map, and NSE freeze quantities for the momentum strategy."""
 
+from __future__ import annotations
+
+import csv
+import logging
+from pathlib import Path
+
+_logger = logging.getLogger(__name__)
+
+
+def load_universe(
+    csv_path: str | Path | None = None,
+) -> tuple[list[str], dict[str, str]]:
+    """Load ticker universe and sector map from a CSV file.
+
+    Falls back to the hardcoded BROAD_UNIVERSE / SECTOR_MAP if the file
+    doesn't exist or is unreadable.
+
+    Returns (tickers, sector_map).
+    """
+    path = Path(csv_path) if csv_path else Path(__file__).parent / "universe.csv"
+    if not path.exists():
+        _logger.info("No universe.csv found, using hardcoded universe")
+        return BROAD_UNIVERSE, SECTOR_MAP
+
+    try:
+        tickers: list[str] = []
+        sectors: dict[str, str] = {}
+        with open(path, newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                ticker = row["ticker"].strip()
+                sector = row.get("sector", "Other").strip()
+                tickers.append(ticker)
+                sectors[ticker] = sector
+        if tickers:
+            _logger.info("Loaded %d tickers from %s", len(tickers), path)
+            return tickers, sectors
+        _logger.warning("universe.csv was empty, using hardcoded universe")
+        return BROAD_UNIVERSE, SECTOR_MAP
+    except Exception as exc:
+        _logger.warning("Failed to load universe.csv (%s), using hardcoded", exc)
+        return BROAD_UNIVERSE, SECTOR_MAP
+
 BROAD_UNIVERSE = [
     # Banking
     "HDFCBANK", "ICICIBANK", "SBIN", "KOTAKBANK", "AXISBANK",
