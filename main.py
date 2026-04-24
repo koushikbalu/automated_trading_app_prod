@@ -70,7 +70,6 @@ def run():
 
     from apscheduler.schedulers.blocking import BlockingScheduler
     from apscheduler.triggers.cron import CronTrigger
-    from apscheduler.triggers.interval import IntervalTrigger
     from apscheduler.executors.pool import ThreadPoolExecutor
 
     from engine import TradingEngine
@@ -95,18 +94,24 @@ def run():
         name="Token refresh",
     )
 
-    scheduler.add_job(
-        engine.periodic_token_check,
-        IntervalTrigger(minutes=30),
-        id="token_check",
-        name="Periodic token re-validation",
-    )
-
     interval_min = schedule.get("stop_monitor_interval_minutes", 5)
     market_open = schedule.get("market_open", "09:15")
     market_close = schedule.get("market_close", "15:30")
     oh, om = market_open.split(":")
     ch, cm = market_close.split(":")
+
+    scheduler.add_job(
+        engine.periodic_token_check,
+        CronTrigger(
+            hour=f"{int(oh)}-{int(ch)}",
+            minute="0,30",
+            day_of_week="mon-fri",
+            timezone="Asia/Kolkata",
+        ),
+        id="token_check",
+        name="Periodic token re-validation",
+    )
+
     scheduler.add_job(
         engine.monitor_stops,
         CronTrigger(

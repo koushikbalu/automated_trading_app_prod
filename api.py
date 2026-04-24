@@ -5,6 +5,7 @@ Run with: uvicorn api:app --host 0.0.0.0 --port 8000
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -75,6 +76,34 @@ def status():
     return engine.get_status()
 
 
+@app.get("/trades", dependencies=[Depends(verify_token)])
+def trades(limit: int = Query(50, ge=1, le=500, description="Number of recent trades")):
+    """Recent trade history."""
+    sm = StateManager()
+    return sm.get_recent_trades(limit)
+
+
+@app.get("/stops", dependencies=[Depends(verify_token)])
+def stops():
+    """Current stop levels for all open positions."""
+    engine = _get_engine()
+    return engine.get_stops()
+
+
+@app.post("/rebalance", dependencies=[Depends(verify_token)])
+def rebalance(background_tasks: BackgroundTasks):
+    """Trigger a force rebalance (bypasses last-trading-day check).
+
+    Runs in a background task so the HTTP response returns immediately.
+    Check /status or Telegram for results.
+    """
+    engine = _get_engine()
+    if engine.state.has_rebalanced_today():
+        raise HTTPException(status_code=409, detail="Rebalance already executed today")
+    background_tasks.add_task(engine.force_rebalance)
+    return {"status": "started", "message": "Rebalance queued. Check /status or Telegram for results."}
+
+
 @app.get("/callback", response_class=HTMLResponse)
 def kite_callback(request_token: str = Query(...), status: str = Query(default="")):
     """Kite OAuth redirect handler.
@@ -116,11 +145,25 @@ def _callback_page(success: bool, message: str) -> str:
 async def kite_webhook(request: Request):
     """Kite postback for order updates.
 
-    Updates trade fill status in DB when Kite sends order status changes.
+    Validates X-Kite-Checksum = SHA256(order_id + order_timestamp + api_secret)
+    before updating trade fill status in DB.
     """
     try:
         body = await request.json()
         logger.info("Kite webhook received: %s", body)
+
+        api_secret = os.environ.get("KITE_API_SECRET", "")
+        if api_secret:
+            order_id = body.get("order_id", "")
+            order_timestamp = body.get("order_timestamp", "")
+            expected = hashlib.sha256(
+                f"{order_id}{order_timestamp}{api_secret}".encode()
+            ).hexdigest()
+            received = body.get("checksum", "")
+            if received != expected:
+                logger.warning("Kite webhook checksum mismatch for order %s", order_id)
+                raise HTTPException(status_code=403, detail="Invalid checksum")
+
         order_id = body.get("order_id")
         status = body.get("status", "").upper()
         filled_qty = body.get("filled_quantity", 0)
@@ -131,6 +174,8 @@ async def kite_webhook(request: Request):
             logger.info("Webhook: order %s -> %s (filled=%d)", order_id, status, filled_qty)
 
         return {"status": "processed"}
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("Kite webhook parse error: %s", exc)
         return {"status": "error", "message": str(exc)}

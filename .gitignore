@@ -1,10 +1,38 @@
+# Secrets
 .env
 kite_token.json
+
+# Database
 *.db
+
+# Runtime data
 cache/
 trades/
 snapshots/
 *.log
+*.log.*
+*.parquet
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
 .venv/
+venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.dockerignore
+
+# Backtest scratch files
+backtrack files/
