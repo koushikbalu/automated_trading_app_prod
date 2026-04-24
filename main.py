@@ -15,6 +15,7 @@ CLI modes:
 from __future__ import annotations
 
 import logging
+from logging.handlers import RotatingFileHandler
 import signal as signal_mod
 import sys
 from pathlib import Path
@@ -29,6 +30,7 @@ def _setup_logging() -> None:
     cfg_path = Path(__file__).parent / "config.yaml"
     level = "INFO"
     log_file = "automated_trading.log"
+    log_cfg: dict = {}
     if cfg_path.exists():
         with open(cfg_path) as f:
             cfg = yaml.safe_load(f)
@@ -36,12 +38,15 @@ def _setup_logging() -> None:
         level = log_cfg.get("level", "INFO")
         log_file = log_cfg.get("file", "automated_trading.log")
 
+    max_bytes = log_cfg.get("max_size_mb", 50) * 1024 * 1024
+    backup_count = log_cfg.get("backup_count", 5)
+
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s %(levelname)-8s %(name)s  %(message)s",
         handlers=[
             logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_file),
+            RotatingFileHandler(log_file, maxBytes=max_bytes, backupCount=backup_count),
         ],
     )
 
@@ -65,6 +70,7 @@ def run():
 
     from apscheduler.schedulers.blocking import BlockingScheduler
     from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.interval import IntervalTrigger
     from apscheduler.executors.pool import ThreadPoolExecutor
 
     from engine import TradingEngine
@@ -87,6 +93,13 @@ def run():
         CronTrigger(hour=int(th), minute=int(tm), day_of_week="mon-fri", timezone="Asia/Kolkata"),
         id="token_refresh",
         name="Token refresh",
+    )
+
+    scheduler.add_job(
+        engine.periodic_token_check,
+        IntervalTrigger(minutes=30),
+        id="token_check",
+        name="Periodic token re-validation",
     )
 
     interval_min = schedule.get("stop_monitor_interval_minutes", 5)

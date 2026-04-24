@@ -263,7 +263,7 @@ def generate_rebalance_signals(
             if bonus > 0:
                 for t in current_positions:
                     if t in cand.index:
-                        cand.loc[t, "risk_adj_score"] += bonus
+                        cand.loc[t, "risk_adj_score"] *= (1 + bonus)
                 cand = cand.sort_values("risk_adj_score", ascending=False)
 
             selected = select_with_sector_caps(

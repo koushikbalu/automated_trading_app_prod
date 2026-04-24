@@ -1,9 +1,14 @@
-"""Telegram notification service with structured message templates."""
+"""Telegram notification service with structured message templates.
+
+Uses a background daemon thread with a queue for non-blocking sends.
+"""
 
 from __future__ import annotations
 
 import logging
 import os
+import threading
+from queue import Queue
 from typing import Any
 
 import httpx
@@ -32,36 +37,56 @@ def _load_telegram_config() -> dict:
 
 
 class TelegramNotifier:
-    """Send Telegram messages for trading events."""
+    """Send Telegram messages for trading events via a non-blocking queue."""
 
     def __init__(self):
         tg = _load_telegram_config()
         self.bot_token: str = tg.get("bot_token", "")
         self.chat_id: str = tg.get("chat_id", "")
         self.send_on: list[str] = tg.get("send_on", [])
+        self._queue: Queue = Queue()
+        self._worker = threading.Thread(target=self._send_loop, daemon=True)
+        self._worker.start()
 
     @property
     def enabled(self) -> bool:
         return bool(self.bot_token and self.chat_id)
 
+    def _send_loop(self) -> None:
+        """Background worker that drains the queue and sends messages."""
+        while True:
+            text = self._queue.get()
+            try:
+                self._send_sync(text)
+            except Exception as exc:
+                logger.error("Telegram background send error: %s", exc)
+            finally:
+                self._queue.task_done()
+
+    def _send_sync(self, text: str) -> bool:
+        """Synchronous send (called from background thread only)."""
+        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
+        for attempt in range(2):
+            try:
+                r = httpx.post(
+                    url,
+                    json={"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"},
+                    timeout=10.0,
+                )
+                if r.status_code == 200:
+                    return True
+                logger.warning("Telegram send failed (attempt %d): %s", attempt + 1, r.text)
+            except Exception as exc:
+                logger.error("Telegram send error (attempt %d): %s", attempt + 1, exc)
+        return False
+
     def _send(self, text: str) -> bool:
+        """Non-blocking enqueue for all notification methods."""
         if not self.enabled:
             logger.debug("Telegram not configured, skipping notification")
             return False
-        url = f"https://api.telegram.org/bot{self.bot_token}/sendMessage"
-        try:
-            r = httpx.post(
-                url,
-                json={"chat_id": self.chat_id, "text": text, "parse_mode": "HTML"},
-                timeout=10.0,
-            )
-            if r.status_code != 200:
-                logger.warning("Telegram send failed: %s", r.text)
-                return False
-            return True
-        except Exception as exc:
-            logger.error("Telegram send error: %s", exc)
-            return False
+        self._queue.put(text)
+        return True
 
     # -- Event methods -----------------------------------------------------
 

@@ -68,6 +68,9 @@ class TradeRecord:
     costs: float = 0.0
     holding_days: Optional[int] = None
     pnl_pct: Optional[float] = None
+    filled_qty: int = 0
+    requested_qty: int = 0
+    fill_status: str = "UNKNOWN"
 
 
 @dataclass
@@ -89,3 +92,4 @@ class PortfolioSnapshot:
     cash_weight: float
     exposure: float
     positions_count: int
+    capital_injections_total: float = 0.0

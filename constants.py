@@ -1,4 +1,4 @@
-"""Stock universe and sector map for the momentum strategy."""
+"""Stock universe, sector map, and NSE freeze quantities for the momentum strategy."""
 
 BROAD_UNIVERSE = [
     # Banking
@@ -171,4 +171,23 @@ SECTOR_MAP: dict[str, str] = {
     "GRAPHITE": "Metals", "RAIN": "Chemicals", "HEG": "Metals",
     "NBCC": "CapGoods", "NCC": "CapGoods", "ENGINERSIN": "CapGoods",
     "UNITECH": "RealEstate",
+}
+
+# NSE freeze quantities for major stocks (conservative subset).
+# Source: NSE circulars. Stocks not listed here default to 50,000.
+FREEZE_QTY: dict[str, int] = {
+    "RELIANCE": 1900, "TCS": 1500, "HDFCBANK": 1800, "INFY": 2400,
+    "ICICIBANK": 2816, "HINDUNILVR": 1500, "SBIN": 4500, "BHARTIARTL": 2700,
+    "ITC": 6400, "KOTAKBANK": 1800, "LT": 1500, "HCLTECH": 2800,
+    "AXISBANK": 3600, "MARUTI": 900, "SUNPHARMA": 2500, "BAJFINANCE": 500,
+    "TITAN": 1500, "TATAMOTORS": 5631, "ADANIENT": 4000, "NTPC": 7000,
+    "WIPRO": 6400, "NESTLEIND": 150, "ULTRACEMCO": 500, "POWERGRID": 9000,
+    "M&M": 2100, "TATASTEEL": 6081, "COALINDIA": 7600, "BAJAJFINSV": 500,
+    "ONGC": 13200, "JSWSTEEL": 4000, "TECHM": 3600, "DRREDDY": 550,
+    "CIPLA": 2600, "DIVISLAB": 850, "EICHERMOT": 700, "ASIANPAINT": 1000,
+    "BRITANNIA": 500, "HINDALCO": 5750, "INDUSINDBK": 2400, "HAL": 700,
+    "APOLLOHOSP": 500, "SHREECEM": 100, "BAJAJ-AUTO": 500,
+    "TRENT": 1500, "ADANIPORTS": 5000, "VEDL": 10000, "GAIL": 12500,
+    "BPCL": 5400, "IOC": 9200, "DLF": 4800, "PNB": 13000,
+    "HEROMOTOCO": 700, "TVSMOTOR": 1500, "BEL": 8800,
 }

@@ -8,7 +8,8 @@ set -euo pipefail
 #   chmod +x deploy.sh && ./deploy.sh
 #
 # Prerequisites:
-#   - EC2 t3.micro in ap-south-1 with SG allowing SSH (22) and HTTP (8000)
+#   - EC2 t3.small (2 vCPU, 2 GB RAM) in ap-south-1 with SG allowing SSH (22) and HTTP (8000)
+#   - Add CloudWatch agent for CPU/memory alerts (recommended)
 #   - RDS PostgreSQL instance created and accessible from this EC2
 #   - .env file prepared with real credentials (see .env.example)
 # -----------------------------------------------------------------------

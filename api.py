@@ -6,10 +6,12 @@ Run with: uvicorn api:app --host 0.0.0.0 --port 8000
 from __future__ import annotations
 
 import logging
+import os
+from contextlib import asynccontextmanager
 from datetime import date, datetime
 from typing import Optional
 
-from fastapi import FastAPI, Query, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Header, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse
 
 from engine import TradingEngine
@@ -19,8 +21,6 @@ from state_manager import StateManager
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Automated Trading System", version="1.0.0")
-
 _engine: TradingEngine | None = None
 
 
@@ -29,6 +29,25 @@ def _get_engine() -> TradingEngine:
     if _engine is None:
         _engine = TradingEngine()
     return _engine
+
+
+def verify_token(authorization: str = Header(None)):
+    """Bearer token auth for sensitive endpoints."""
+    expected = os.environ.get("API_AUTH_TOKEN", "")
+    if not expected:
+        return
+    if authorization != f"Bearer {expected}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("API started")
+    yield
+    logger.info("API shutting down")
+
+
+app = FastAPI(title="Automated Trading System", version="1.0.0", lifespan=lifespan)
 
 
 @app.get("/health")
@@ -49,7 +68,7 @@ def health():
     }
 
 
-@app.get("/status")
+@app.get("/status", dependencies=[Depends(verify_token)])
 def status():
     """Current portfolio value, positions, exposure, regime."""
     engine = _get_engine()
@@ -95,15 +114,23 @@ def _callback_page(success: bool, message: str) -> str:
 
 @app.post("/webhook/kite")
 async def kite_webhook(request: Request):
-    """Kite postback for order updates (optional).
+    """Kite postback for order updates.
 
-    Kite sends a POST with order status updates if configured
-    in the Kite Connect dashboard.
+    Updates trade fill status in DB when Kite sends order status changes.
     """
     try:
         body = await request.json()
         logger.info("Kite webhook received: %s", body)
-        return {"status": "received"}
+        order_id = body.get("order_id")
+        status = body.get("status", "").upper()
+        filled_qty = body.get("filled_quantity", 0)
+
+        if order_id and status:
+            sm = StateManager()
+            sm.update_trade_fill_status(order_id, status, filled_qty)
+            logger.info("Webhook: order %s -> %s (filled=%d)", order_id, status, filled_qty)
+
+        return {"status": "processed"}
     except Exception as exc:
         logger.error("Kite webhook parse error: %s", exc)
         return {"status": "error", "message": str(exc)}
@@ -113,10 +140,11 @@ async def kite_webhook(request: Request):
 # Report download endpoints
 # ---------------------------------------------------------------------------
 
-def _report_response(period: str, ref_date: Optional[str]) -> FileResponse:
+def _report_response(period: str, ref_date: Optional[str], background_tasks: BackgroundTasks) -> FileResponse:
     reference = date.fromisoformat(ref_date) if ref_date else None
     sm = StateManager()
     path = generate_report(period, reference_date=reference, state_manager=sm)
+    background_tasks.add_task(path.unlink, missing_ok=True)
     return FileResponse(
         path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -124,19 +152,28 @@ def _report_response(period: str, ref_date: Optional[str]) -> FileResponse:
     )
 
 
-@app.get("/reports/weekly")
-def report_weekly(date: Optional[str] = Query(None, description="Reference date YYYY-MM-DD")):
+@app.get("/reports/weekly", dependencies=[Depends(verify_token)])
+def report_weekly(
+    background_tasks: BackgroundTasks,
+    date: Optional[str] = Query(None, description="Reference date YYYY-MM-DD"),
+):
     """Download the weekly trading report as an Excel file."""
-    return _report_response("weekly", date)
+    return _report_response("weekly", date, background_tasks)
 
 
-@app.get("/reports/monthly")
-def report_monthly(date: Optional[str] = Query(None, description="Reference date YYYY-MM-DD")):
+@app.get("/reports/monthly", dependencies=[Depends(verify_token)])
+def report_monthly(
+    background_tasks: BackgroundTasks,
+    date: Optional[str] = Query(None, description="Reference date YYYY-MM-DD"),
+):
     """Download the monthly trading report as an Excel file."""
-    return _report_response("monthly", date)
+    return _report_response("monthly", date, background_tasks)
 
 
-@app.get("/reports/yearly")
-def report_yearly(date: Optional[str] = Query(None, description="Reference date YYYY-MM-DD")):
+@app.get("/reports/yearly", dependencies=[Depends(verify_token)])
+def report_yearly(
+    background_tasks: BackgroundTasks,
+    date: Optional[str] = Query(None, description="Reference date YYYY-MM-DD"),
+):
     """Download the yearly trading report as an Excel file."""
-    return _report_response("yearly", date)
+    return _report_response("yearly", date, background_tasks)

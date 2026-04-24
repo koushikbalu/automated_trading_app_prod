@@ -10,8 +10,13 @@ publishes future calendars (typically in December for the next year).
 from __future__ import annotations
 
 import calendar
+import logging
 from datetime import date, timedelta
 from functools import lru_cache
+
+logger = logging.getLogger(__name__)
+
+_MAX_HOLIDAY_YEAR = 2027
 
 _RAW_HOLIDAYS: set[date] = {
     # ── 2024 ──
@@ -98,6 +103,8 @@ _RAW_HOLIDAYS: set[date] = {
 
 def is_trading_day(d: date) -> bool:
     """True if *d* is a weekday and not an NSE holiday."""
+    if d.year > _MAX_HOLIDAY_YEAR:
+        logger.warning("NSE calendar not updated beyond %d -- holiday check may be inaccurate", _MAX_HOLIDAY_YEAR)
     if d.weekday() >= 5:
         return False
     return d not in _RAW_HOLIDAYS

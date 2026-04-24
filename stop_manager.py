@@ -8,6 +8,7 @@ Ported from momentum_trading_backtest.py lines 760-785 (stops) and
 from __future__ import annotations
 
 import logging
+from datetime import date as _date_type
 from typing import Optional
 
 import pandas as pd
@@ -111,10 +112,14 @@ def check_all_stops(
                 triggered = True
                 reason = f"Hard stop ({max_loss_pct:.0%})"
 
-        if price < pos.entry_price:
-            pos.losing_days += 1
-        else:
-            pos.losing_days = 0
+        today = _date_type.today()
+        last_check = getattr(pos, "_last_losing_check", None)
+        if last_check != today:
+            if price < pos.entry_price:
+                pos.losing_days += 1
+            else:
+                pos.losing_days = 0
+            pos._last_losing_check = today
 
         if max_losing_days > 0 and not triggered and pos.losing_days >= max_losing_days:
             triggered = True

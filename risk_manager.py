@@ -15,7 +15,7 @@ import pandas as pd
 import yaml
 from pathlib import Path
 
-from constants import SECTOR_MAP
+from constants import FREEZE_QTY, SECTOR_MAP
 from models import OrderAction, Position, RegimeLevel, RegimeState, Signal
 from utils import capped_inverse_vol_weights
 
@@ -89,9 +89,16 @@ def enforce_sector_caps(
 ) -> dict[str, float]:
     """Scale down weights if any sector exceeds its cap, redistributing
     the excess proportionally among under-cap sectors.
+
+    Preserves the original total weight so that regime allocation
+    (e.g. 70% in neutral) is not destroyed by renormalization to 1.0.
     """
     if sector_map is None:
         sector_map = SECTOR_MAP
+
+    original_total = sum(target_weights.values())
+    if original_total <= 0:
+        return target_weights
 
     sector_totals: dict[str, float] = {}
     for ticker, w in target_weights.items():
@@ -109,9 +116,9 @@ def enforce_sector_caps(
             if sector_map.get(ticker, "Other") == sector:
                 adjusted[ticker] *= scale
 
-    total = sum(adjusted.values())
-    if total > 0:
-        adjusted = {t: w / total for t, w in adjusted.items()}
+    new_total = sum(adjusted.values())
+    if new_total > 0:
+        adjusted = {t: w / new_total * original_total for t, w in adjusted.items()}
 
     return adjusted
 
@@ -191,8 +198,9 @@ def validate_order(
     available_capital: float,
     current_position_count: int,
     max_positions: int = 10,
+    price: float = 0.0,
 ) -> tuple[bool, str]:
-    """Pre-trade checks: capital sufficiency, position limits."""
+    """Pre-trade checks: capital sufficiency, position limits, freeze qty."""
     order_value = weight * portfolio_value
 
     if order_value > available_capital:
@@ -203,5 +211,11 @@ def validate_order(
 
     if order_value < 1000:
         return False, f"Order value too small: {order_value:.0f}"
+
+    if price > 0:
+        order_qty = int(order_value / price)
+        freeze_limit = FREEZE_QTY.get(ticker, 50000)
+        if order_qty > freeze_limit:
+            return False, f"Qty {order_qty} exceeds NSE freeze limit {freeze_limit} for {ticker} -- use sliced orders"
 
     return True, ""

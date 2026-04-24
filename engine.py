@@ -11,6 +11,7 @@ Scheduled jobs call these methods:
 from __future__ import annotations
 
 import logging
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -27,9 +28,9 @@ from models import (
     Signal,
 )
 from notifier import TelegramNotifier
-from nse_calendar import is_last_trading_day as _nse_is_last_trading_day, is_trading_day
+from nse_calendar import is_last_trading_day as _nse_is_last_trading_day, is_trading_day, prev_trading_day
 from order_manager import OrderManager
-from risk_manager import CircuitBreaker, apply_exposure_floor, enforce_sector_caps
+from risk_manager import CircuitBreaker, apply_exposure_floor, enforce_sector_caps, validate_order
 from signal_generator import assess_regime, generate_rebalance_signals, score_and_rank
 from state_manager import StateManager
 from stop_manager import check_all_stops, check_re_entry, compute_initial_stop
@@ -57,6 +58,7 @@ class TradingEngine:
 
     def __init__(self, cfg: dict | None = None):
         self.cfg = cfg or _load_config()
+        self._lock = threading.RLock()
         self.state = StateManager()
         self.notifier = TelegramNotifier()
         self.order_mgr = OrderManager(self.cfg, notifier=self.notifier)
@@ -87,6 +89,7 @@ class TradingEngine:
             p.weight * self.portfolio_value for p in self.positions.values()
         )
         self._token_valid: bool = True
+        self._capital_injections_total: float = snap.capital_injections_total if snap else 0.0
         self._last_stop_check: datetime | None = None
         self._last_rebalance: datetime | None = None
         self._atr_cache: dict[str, float] = {}
@@ -98,9 +101,11 @@ class TradingEngine:
     # ------------------------------------------------------------------
 
     def _sync_portfolio_value(self) -> None:
-        """Sync portfolio value from live broker data.
+        """Sync portfolio value from live broker data (ground truth).
 
-        In dry-run mode, falls back to snapshot-based calculation.
+        Uses kite.positions() for invested value instead of internal weights,
+        eliminating circular dependency. In dry-run mode, falls back to
+        snapshot-based calculation.
         """
         if self.order_mgr.dry_run:
             return
@@ -110,13 +115,36 @@ class TradingEngine:
             margins = kite.margins("equity")
             available_cash = float(margins.get("available", {}).get("cash", 0))
 
-            live_prices = get_live_quotes(list(self.positions.keys()))
+            broker_positions = kite.positions().get("net", [])
             invested_value = 0.0
-            for ticker, pos in self.positions.items():
-                price = live_prices.get(ticker, pos.entry_price)
-                invested_value += pos.weight * self.portfolio_value * (price / pos.entry_price)
+            for bp in broker_positions:
+                qty = int(bp.get("quantity", 0))
+                ltp = float(bp.get("last_price", 0))
+                if qty > 0 and ltp > 0:
+                    invested_value += qty * ltp
 
-            self.portfolio_value = available_cash + invested_value
+            old_value = self.portfolio_value
+            new_value = available_cash + invested_value
+
+            old_invested = sum(
+                p.weight * old_value for p in self.positions.values()
+            )
+            live_prices = get_live_quotes(list(self.positions.keys()))
+            market_change = 0.0
+            for ticker, pos in self.positions.items():
+                ltp = live_prices.get(ticker)
+                if ltp and pos.entry_price > 0:
+                    market_change += pos.weight * old_value * (ltp / pos.entry_price - 1)
+
+            value_change = new_value - old_value
+            injection = value_change - market_change
+            if abs(injection) > 10000:
+                logger.info("Capital injection detected: ~%.0f", injection)
+                self._capital_injections_total += injection
+                self.portfolio_peak = max(self.portfolio_peak, self.portfolio_peak + injection)
+                self.notifier.notify_error(f"Capital injection detected: ~₹{injection:,.0f}")
+
+            self.portfolio_value = new_value
             self.portfolio_peak = max(self.portfolio_peak, self.portfolio_value)
             self.available_cash = available_cash
             logger.info(
@@ -133,8 +161,10 @@ class TradingEngine:
     def _reconcile_positions(self) -> None:
         """Compare internal position state against broker holdings.
 
-        Logs warnings for any mismatches. Sends Telegram alerts for
-        critical divergences (>5% weight difference). Does NOT auto-correct.
+        Auto-corrects internal state when mismatches are found:
+        - Broker has fewer shares: update pos.weight downward
+        - Broker has position we don't track: add warning (manual review)
+        - We track position broker doesn't have: close internally
         """
         if self.order_mgr.dry_run:
             return
@@ -146,34 +176,51 @@ class TradingEngine:
             logger.error("Position reconciliation failed: %s", exc)
             return
 
-        broker_map: dict[str, int] = {}
+        broker_map: dict[str, dict] = {}
         for bp in broker_positions:
             sym = bp.get("tradingsymbol", "")
             qty = int(bp.get("quantity", 0))
-            if qty != 0:
-                broker_map[sym] = qty
+            ltp = float(bp.get("last_price", 0))
+            if qty > 0:
+                broker_map[sym] = {"qty": qty, "ltp": ltp}
 
-        for ticker, pos in self.positions.items():
+        for ticker in list(self.positions.keys()):
+            pos = self.positions[ticker]
             expected_qty = int((pos.weight * self.portfolio_value) / pos.entry_price) if pos.entry_price > 0 else 0
-            broker_qty = broker_map.pop(ticker, 0)
+            broker_info = broker_map.pop(ticker, None)
+            broker_qty = broker_info["qty"] if broker_info else 0
 
-            if expected_qty == 0:
+            if expected_qty == 0 and broker_qty == 0:
                 continue
 
-            diff_pct = abs(broker_qty - expected_qty) / expected_qty if expected_qty else 1.0
+            if broker_qty == 0:
+                msg = f"Broker has 0 shares of {ticker} but internal tracks weight {pos.weight:.3f} -- closing internally"
+                logger.warning(msg)
+                self.notifier.notify_error(f"RECONCILIATION: {msg}")
+                self.state.close_position(ticker)
+                del self.positions[ticker]
+                continue
+
+            if expected_qty > 0:
+                diff_pct = abs(broker_qty - expected_qty) / expected_qty
+            else:
+                diff_pct = 1.0
+
             if diff_pct > 0.05:
+                corrected_weight = (broker_qty * (broker_info["ltp"] if broker_info else pos.entry_price)) / self.portfolio_value if self.portfolio_value > 0 else 0.0
                 msg = (
-                    f"Position mismatch: {ticker} internal={expected_qty} "
-                    f"broker={broker_qty} (diff={diff_pct:.1%})"
+                    f"Position corrected: {ticker} internal_qty={expected_qty} "
+                    f"broker_qty={broker_qty} (weight {pos.weight:.3f} -> {corrected_weight:.3f})"
                 )
                 logger.warning(msg)
                 self.notifier.notify_error(f"RECONCILIATION: {msg}")
-            elif broker_qty != expected_qty:
-                logger.info("Minor qty diff: %s internal=%d broker=%d", ticker, expected_qty, broker_qty)
+                pos.weight = corrected_weight
+                self.state.save_position(pos)
 
-        for sym, qty in broker_map.items():
-            logger.warning("Broker has position not in internal state: %s qty=%d", sym, qty)
-            self.notifier.notify_error(f"RECONCILIATION: Unknown broker position {sym} qty={qty}")
+        for sym, info in broker_map.items():
+            msg = f"Broker has untracked position: {sym} qty={info['qty']}"
+            logger.warning(msg)
+            self.notifier.notify_error(f"RECONCILIATION: {msg}")
 
     # ------------------------------------------------------------------
     # Token validity guard
@@ -189,6 +236,24 @@ class TradingEngine:
             return False
         return True
 
+    def _validate_signals(self, signals: list[Signal], skip_sells: bool = False) -> list[Signal]:
+        """Pre-trade validation filter. Sells bypass capital/position checks."""
+        top_n = self.cfg.get("strategy", {}).get("top_momentum_n", 10)
+        validated: list[Signal] = []
+        for sig in signals:
+            if skip_sells or sig.action in (OrderAction.SELL, OrderAction.REBAL_EXIT):
+                validated.append(sig)
+                continue
+            ok, reason = validate_order(
+                sig.ticker, sig.target_weight, self.portfolio_value,
+                self.available_cash, len(self.positions), top_n,
+            )
+            if ok:
+                validated.append(sig)
+            else:
+                logger.warning("Order rejected by pre-trade check: %s %s -- %s", sig.action, sig.ticker, reason)
+        return validated
+
     # ------------------------------------------------------------------
     # refresh_token  (09:10 IST)
     # ------------------------------------------------------------------
@@ -201,6 +266,18 @@ class TradingEngine:
             if not self._token_valid:
                 self.notifier.notify_error("ALERT: Kite token refresh failed. Manual login required.")
 
+    def periodic_token_check(self) -> None:
+        """Re-validate token every 30 min to detect /callback refreshes."""
+        if self.order_mgr.dry_run:
+            return
+        self._token_valid = self.token_mgr.validate_token()
+        if not self._token_valid:
+            from data_manager import reset_kite
+            reset_kite()
+            self._token_valid = self.token_mgr.validate_token()
+            if not self._token_valid:
+                logger.warning("Token still invalid after kite reset")
+
     # ------------------------------------------------------------------
     # monitor_stops  (every 5 min, 09:15-15:30)
     # ------------------------------------------------------------------
@@ -208,9 +285,14 @@ class TradingEngine:
     def monitor_stops(self) -> None:
         if not self._require_valid_token("monitor_stops"):
             return
+        with self._lock:
+            self._monitor_stops_impl()
+
+    def _monitor_stops_impl(self) -> None:
         if not self.positions:
             return
         self._sync_portfolio_value()
+        self._reconcile_positions()
         logger.info("Monitoring stops for %d positions...", len(self.positions))
 
         tickers = list(self.positions.keys())
@@ -255,18 +337,23 @@ class TradingEngine:
             regime_level = cached_regime_level
 
         snap_regime = type("R", (), {"level": regime_level})()
+        was_cb_active = self.circuit_breaker.active
         cb_triggered = self.circuit_breaker.check(
             self.portfolio_value, self.portfolio_peak, snap_regime
         )
 
-        if cb_triggered and not self.circuit_breaker.active:
-            pass
+        if was_cb_active and not self.circuit_breaker.active:
+            self.portfolio_peak = self.portfolio_value
+            logger.info("CB reset: portfolio_peak rebased to %.0f", self.portfolio_value)
 
         if self.circuit_breaker.active:
             logger.warning("Circuit breaker ACTIVE -- liquidating all positions")
             dd = (self.portfolio_value / self.portfolio_peak) - 1 if self.portfolio_peak > 0 else 0
             trades = self.order_mgr.liquidate_all(self.positions, live_prices, self.portfolio_value)
             for t in trades:
+                pos = self.positions.get(t.ticker)
+                if pos and pos.entry_price > 0:
+                    t.pnl_pct = (t.price / pos.entry_price) - 1
                 self.state.record_trade(t)
                 self.state.close_position(t.ticker)
             self.positions.clear()
@@ -284,16 +371,35 @@ class TradingEngine:
                 pos = self.positions.get(sig.ticker)
                 if pos:
                     tr.holding_days = (datetime.now() - pos.entry_date).days
+                    if pos.entry_price > 0:
+                        tr.pnl_pct = (tr.price / pos.entry_price) - 1
                 self.state.record_trade(tr)
 
-            self.state.close_position(sig.ticker)
-            self.state.save_stopped_out(sig.ticker, sig.current_weight, datetime.now())
-            self.stopped_out[sig.ticker] = sig.current_weight
-            if sig.ticker in self.positions:
-                del self.positions[sig.ticker]
+                if tr.fill_status == "COMPLETE" or tr.fill_status == "DRY_RUN":
+                    self.state.close_position(sig.ticker)
+                    self.state.save_stopped_out(sig.ticker, sig.current_weight, datetime.now())
+                    self.stopped_out[sig.ticker] = sig.current_weight
+                    if sig.ticker in self.positions:
+                        del self.positions[sig.ticker]
+                elif tr.fill_status == "PARTIAL" and tr.weight_traded > 0:
+                    residual_weight = sig.current_weight - tr.weight_traded
+                    if sig.ticker in self.positions and residual_weight > 0.001:
+                        self.positions[sig.ticker].weight = residual_weight
+                        self.state.save_position(self.positions[sig.ticker])
+                        logger.warning(
+                            "Partial stop exit for %s: sold %.3f, residual %.3f -- will retry next cycle",
+                            sig.ticker, tr.weight_traded, residual_weight,
+                        )
+                    else:
+                        self.state.close_position(sig.ticker)
+                        if sig.ticker in self.positions:
+                            del self.positions[sig.ticker]
+                elif tr.fill_status == "REJECTED":
+                    self.notifier.notify_error(f"STOP SELL REJECTED: {sig.ticker} -- will retry next cycle")
 
             self.notifier.notify_stop_triggered(sig)
 
+        self._recalc_available_cash()
         self.state.update_position_prices(live_prices)
         self._last_stop_check = datetime.now()
 
@@ -304,6 +410,10 @@ class TradingEngine:
     def check_re_entry_job(self) -> None:
         if not self._require_valid_token("check_re_entry_job"):
             return
+        with self._lock:
+            self._check_re_entry_impl()
+
+    def _check_re_entry_impl(self) -> None:
         if not self.stopped_out:
             return
         self._refresh_rankings_if_stale()
@@ -326,10 +436,10 @@ class TradingEngine:
                 atr_values[ticker] = float(atr_val.iloc[-1])
 
         top_n = self.cfg.get("strategy", {}).get("top_momentum_n", 10)
-        re_entry_signals = check_re_entry(
+        re_entry_signals = self._validate_signals(check_re_entry(
             self.stopped_out, self._last_ranked, live_prices,
             dma_20, atr_values, self.positions, top_n, self.cfg,
-        )
+        ))
 
         for sig in re_entry_signals:
             atr_mult = self.cfg.get("exits", {}).get("atr_multiple", 2.5)
@@ -339,22 +449,24 @@ class TradingEngine:
             for tr in trade_records:
                 self.state.record_trade(tr)
 
-            new_pos = Position(
-                ticker=sig.ticker,
-                weight=sig.target_weight,
-                entry_price=sig.price,
-                entry_date=datetime.now(),
-                high_watermark=sig.price,
-                stop_price=stop,
-                sector=SECTOR_MAP.get(sig.ticker, "Other"),
-            )
-            self.positions[sig.ticker] = new_pos
-            self.state.save_position(new_pos)
+                if tr.fill_status in ("COMPLETE", "PARTIAL", "DRY_RUN") and tr.weight_traded > 0:
+                    actual_weight = tr.weight_traded
+                    new_pos = Position(
+                        ticker=sig.ticker,
+                        weight=actual_weight,
+                        entry_price=tr.price,
+                        entry_date=datetime.now(),
+                        high_watermark=tr.price,
+                        stop_price=stop,
+                        sector=SECTOR_MAP.get(sig.ticker, "Other"),
+                    )
+                    self.positions[sig.ticker] = new_pos
+                    self.state.save_position(new_pos)
 
-            if sig.ticker in self.stopped_out:
-                del self.stopped_out[sig.ticker]
+                    if sig.ticker in self.stopped_out:
+                        del self.stopped_out[sig.ticker]
 
-            self.notifier.notify_re_entry(sig)
+                    self.notifier.notify_re_entry(sig)
 
     # ------------------------------------------------------------------
     # daily_rebalance  (15:45 IST, last trading day)
@@ -370,7 +482,10 @@ class TradingEngine:
         if self.state.has_rebalanced_today():
             logger.warning("Rebalance already executed today, skipping duplicate")
             return
+        with self._lock:
+            self._execute_rebalance()
 
+    def _execute_rebalance(self) -> None:
         self._sync_portfolio_value()
         self._reconcile_positions()
         logger.info("Running monthly rebalance...")
@@ -414,13 +529,22 @@ class TradingEngine:
 
         self.state.save_regime(result.regime)
 
-        all_signals = result.sells + result.buys
+        all_signals = self._validate_signals(result.sells + result.buys)
         trade_records = self.order_mgr.place_orders(all_signals, self.portfolio_value)
 
+        sell_tickers = {s.ticker for s in result.sells}
         for sig in result.sells:
-            if sig.ticker in self.positions:
-                del self.positions[sig.ticker]
-            self.state.close_position(sig.ticker)
+            if sig.ticker in sell_tickers:
+                trs = [tr for tr in trade_records if tr.ticker == sig.ticker]
+                pos = self.positions.get(sig.ticker)
+                for tr in trs:
+                    if pos and pos.entry_price > 0 and tr.action == "SELL":
+                        tr.pnl_pct = (tr.price / pos.entry_price) - 1
+                sold_ok = any(tr.fill_status in ("COMPLETE", "DRY_RUN") for tr in trs)
+                if sold_ok or not trs:
+                    if sig.ticker in self.positions:
+                        del self.positions[sig.ticker]
+                    self.state.close_position(sig.ticker)
 
         atr_mult = self.cfg.get("exits", {}).get("atr_multiple", 2.5)
         atr_df = compute_atr_df(stocks_high, stocks_low, stocks_close, 14)
@@ -428,17 +552,18 @@ class TradingEngine:
         for sig in result.buys:
             atr_val = float(atr_df[sig.ticker].iloc[-1]) if sig.ticker in atr_df.columns and pd.notna(atr_df[sig.ticker].iloc[-1]) else 0.0
             stop = compute_initial_stop(sig.price, atr_val, atr_mult)
-            tw = result.target_weights.get(sig.ticker, sig.target_weight)
+            trs = [tr for tr in trade_records if tr.ticker == sig.ticker and tr.action == "BUY"]
+            actual_weight = trs[0].weight_traded if trs and trs[0].weight_traded > 0 else result.target_weights.get(sig.ticker, sig.target_weight)
 
             if sig.ticker in self.positions:
-                self.positions[sig.ticker].weight = tw
+                self.positions[sig.ticker].weight = actual_weight
             else:
                 new_pos = Position(
                     ticker=sig.ticker,
-                    weight=tw,
-                    entry_price=sig.price,
+                    weight=actual_weight,
+                    entry_price=trs[0].price if trs else sig.price,
                     entry_date=datetime.now(),
-                    high_watermark=sig.price,
+                    high_watermark=trs[0].price if trs else sig.price,
                     stop_price=stop,
                     sector=SECTOR_MAP.get(sig.ticker, "Other"),
                 )
@@ -459,26 +584,26 @@ class TradingEngine:
             dma_100, dma_200, SECTOR_MAP, self.cfg,
         )
 
-        exposure_signals = apply_exposure_floor(
-            self.positions, self._last_ranked, stocks_close, atr_df, self.cfg,
+        exposure_signals = self._validate_signals(
+            apply_exposure_floor(self.positions, self._last_ranked, stocks_close, atr_df, self.cfg)
         )
         if exposure_signals:
             floor_trades = self.order_mgr.place_orders(exposure_signals, self.portfolio_value)
-            for sig in exposure_signals:
+            for sig, tr in zip(exposure_signals, floor_trades):
                 atr_val = float(atr_df[sig.ticker].iloc[-1]) if sig.ticker in atr_df.columns and pd.notna(atr_df[sig.ticker].iloc[-1]) else 0.0
                 stop = compute_initial_stop(sig.price, atr_val, atr_mult)
+                actual_w = tr.weight_traded if tr.weight_traded > 0 else sig.target_weight
                 new_pos = Position(
                     ticker=sig.ticker,
-                    weight=sig.target_weight,
-                    entry_price=sig.price,
+                    weight=actual_w,
+                    entry_price=tr.price,
                     entry_date=datetime.now(),
-                    high_watermark=sig.price,
+                    high_watermark=tr.price,
                     stop_price=stop,
                     sector=SECTOR_MAP.get(sig.ticker, "Other"),
                 )
                 self.positions[sig.ticker] = new_pos
                 self.state.save_position(new_pos)
-            for tr in floor_trades:
                 self.state.record_trade(tr)
 
         self.stopped_out.clear()
@@ -502,6 +627,10 @@ class TradingEngine:
         """Add to winning positions that remain in the top-N momentum ranking."""
         if not self._require_valid_token("check_pyramid"):
             return
+        with self._lock:
+            self._check_pyramid_impl()
+
+    def _check_pyramid_impl(self) -> None:
         pyramid_cfg = self.cfg.get("pyramid", {})
         if not pyramid_cfg.get("enabled", True):
             return
@@ -532,31 +661,30 @@ class TradingEngine:
                 continue
             gain = (price / pos.entry_price) - 1 if pos.entry_price > 0 else 0.0
             if gain >= threshold and ticker in top_ranked:
-                pos.pyramid_count += 1
-                pos.weight += add_pct
-
-                if ratchet:
-                    be_stop = pos.entry_price
-                    if pos.stop_price is None or pos.stop_price < be_stop:
-                        pos.stop_price = be_stop
-
                 sig = Signal(
                     ticker=ticker,
                     action=OrderAction.BUY,
-                    target_weight=pos.weight,
-                    current_weight=pos.weight - add_pct,
+                    target_weight=pos.weight + add_pct,
+                    current_weight=pos.weight,
                     price=price,
-                    reason=f"Pyramid #{pos.pyramid_count} (gain {gain:.1%})",
+                    reason=f"Pyramid #{pos.pyramid_count + 1} (gain {gain:.1%})",
                 )
                 trade_records = self.order_mgr.place_orders([sig], self.portfolio_value)
                 for tr in trade_records:
                     self.state.record_trade(tr)
-                self.state.save_position(pos)
-                self.notifier.notify_re_entry(sig)
-                logger.info(
-                    "PYRAMID #%d: %s at %.2f (gain %.1f%%)",
-                    pos.pyramid_count, ticker, price, gain * 100,
-                )
+                    if tr.fill_status in ("COMPLETE", "PARTIAL", "DRY_RUN") and tr.weight_traded > 0:
+                        pos.pyramid_count += 1
+                        pos.weight += tr.weight_traded
+                        if ratchet:
+                            be_stop = pos.entry_price
+                            if pos.stop_price is None or pos.stop_price < be_stop:
+                                pos.stop_price = be_stop
+                        self.state.save_position(pos)
+                        self.notifier.notify_re_entry(sig)
+                        logger.info(
+                            "PYRAMID #%d: %s at %.2f (gain %.1f%%)",
+                            pos.pyramid_count, ticker, price, gain * 100,
+                        )
 
     # ------------------------------------------------------------------
     # daily_summary  (16:00 IST)
@@ -566,7 +694,10 @@ class TradingEngine:
         logger.info("Sending daily summary...")
         self._sync_portfolio_value()
         snap = self._current_snapshot()
-        prev = self.state.load_latest_portfolio_state()
+        prev_td = prev_trading_day(datetime.now().date())
+        prev = self.state.load_snapshot_for_date(prev_td)
+        if prev is None:
+            prev = self.state.load_latest_portfolio_state()
         day_pnl = snap.portfolio_value - (prev.portfolio_value if prev else self.initial_capital)
         self.notifier.notify_daily_summary(snap, day_pnl)
         self._save_snapshot()
@@ -652,6 +783,11 @@ class TradingEngine:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _recalc_available_cash(self) -> None:
+        """Recalculate available cash after trades."""
+        invested = sum(p.weight * self.portfolio_value for p in self.positions.values())
+        self.available_cash = max(0.0, self.portfolio_value - invested)
+
     def _current_snapshot(self) -> PortfolioSnapshot:
         exposure = sum(p.weight for p in self.positions.values())
         return PortfolioSnapshot(
@@ -662,6 +798,7 @@ class TradingEngine:
             cash_weight=max(0.0, 1 - exposure),
             exposure=exposure,
             positions_count=len(self.positions),
+            capital_injections_total=self._capital_injections_total,
         )
 
     def _save_snapshot(self) -> None:
@@ -717,97 +854,8 @@ class TradingEngine:
         if self.state.has_rebalanced_today():
             logger.warning("Rebalance already executed today, skipping duplicate")
             return
-
-        self._sync_portfolio_value()
-        self._reconcile_positions()
-        logger.info("Running FORCED monthly rebalance (calendar guard bypassed)...")
-
-        all_tickers = BROAD_UNIVERSE.copy()
-        bench_sym = self.cfg.get("strategy", {}).get("benchmark", "NIFTY 200").replace("NSE:", "")
-
-        data = fetch_historical_bulk(
-            all_tickers + [bench_sym], days=400, benchmark_col=bench_sym,
-        )
-        if not data or data["close"].empty:
-            logger.error("No data available for rebalance")
-            self.notifier.notify_error("Forced rebalance failed: no market data")
-            return
-
-        close = data["close"]
-        high = data["high"]
-        low = data["low"]
-        volume = data["volume"]
-
-        if bench_sym not in close.columns:
-            logger.error("Benchmark %s not found in data", bench_sym)
-            self.notifier.notify_error(f"Forced rebalance failed: benchmark {bench_sym} missing")
-            return
-
-        benchmark_close = close[bench_sym].dropna()
-        stocks_close = close.drop(columns=[bench_sym], errors="ignore")
-        stocks_high = high.drop(columns=[bench_sym], errors="ignore")
-        stocks_low = low.drop(columns=[bench_sym], errors="ignore")
-        stocks_volume = volume.drop(columns=[bench_sym], errors="ignore")
-
-        result = generate_rebalance_signals(
-            stocks_close, stocks_high, stocks_low, stocks_volume,
-            benchmark_close, self.positions, self.cfg,
-        )
-
-        result.target_weights = enforce_sector_caps(
-            result.target_weights,
-            self.cfg.get("sizing", {}).get("max_sector_weight", 0.30),
-        )
-
-        self.state.save_regime(result.regime)
-
-        all_signals = result.sells + result.buys
-        trade_records = self.order_mgr.place_orders(all_signals, self.portfolio_value)
-
-        for sig in result.sells:
-            if sig.ticker in self.positions:
-                del self.positions[sig.ticker]
-            self.state.close_position(sig.ticker)
-
-        atr_mult = self.cfg.get("exits", {}).get("atr_multiple", 2.5)
-        atr_df = compute_atr_df(stocks_high, stocks_low, stocks_close, 14)
-
-        for sig in result.buys:
-            atr_val = float(atr_df[sig.ticker].iloc[-1]) if sig.ticker in atr_df.columns and pd.notna(atr_df[sig.ticker].iloc[-1]) else 0.0
-            stop = compute_initial_stop(sig.price, atr_val, atr_mult)
-            tw = result.target_weights.get(sig.ticker, sig.target_weight)
-
-            if sig.ticker in self.positions:
-                self.positions[sig.ticker].weight = tw
-            else:
-                new_pos = Position(
-                    ticker=sig.ticker,
-                    weight=tw,
-                    entry_price=sig.price,
-                    entry_date=datetime.now(),
-                    high_watermark=sig.price,
-                    stop_price=stop,
-                    sector=SECTOR_MAP.get(sig.ticker, "Other"),
-                )
-                self.positions[sig.ticker] = new_pos
-
-            self.state.save_position(self.positions[sig.ticker])
-
-        for tr in trade_records:
-            self.state.record_trade(tr)
-
-        self.stopped_out.clear()
-        self.state.clear_stopped_out_month(datetime.now().strftime("%Y-%m"))
-
-        self.state.save_rebalance(
-            result.date, result.num_selected,
-            result.regime.allocation_pct, result.target_weights,
-        )
-
-        self.notifier.notify_rebalance(result.buys, result.sells, result.regime)
-        self._save_snapshot()
-        self._last_rebalance = datetime.now()
-        logger.info("Forced rebalance complete: %d buys, %d sells", len(result.buys), len(result.sells))
+        with self._lock:
+            self._execute_rebalance()
 
     def get_health(self) -> dict:
         """Return health metrics for the /health endpoint."""

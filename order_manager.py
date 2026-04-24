@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Optional
 
 import yaml
@@ -56,6 +56,16 @@ class OrderManager:
         self.one_way_cost = costs.get("one_way_brokerage", 0.0003)
         self.slippage = costs.get("slippage_estimate", 0.001)
 
+        self._orders_placed_today: set[tuple[str, str, str]] = set()
+        self._orders_placed_date: date | None = None
+
+        self.cfg = cfg
+        exec_cfg = cfg.get("execution", {})
+        self.max_participation_rate: float = exec_cfg.get("max_participation_rate", 0.05)
+        self.max_slice_value: float = exec_cfg.get("max_slice_value", 2_500_000)
+        self.slice_delay: float = exec_cfg.get("slice_delay_seconds", 30)
+        self.freeze_qty_buffer: float = exec_cfg.get("freeze_qty_buffer", 0.90)
+
     # ------------------------------------------------------------------
     # Order placement
     # ------------------------------------------------------------------
@@ -77,46 +87,81 @@ class OrderManager:
         else:
             txn_type = "BUY"
 
+        today = datetime.now().date()
+        if self._orders_placed_date != today:
+            self._orders_placed_today.clear()
+            self._orders_placed_date = today
+        dedup_key = (signal.ticker, str(today), txn_type)
+        if dedup_key in self._orders_placed_today:
+            logger.warning("Duplicate order blocked: %s %s", txn_type, signal.ticker)
+            return TradeRecord(
+                date=datetime.now(), ticker=signal.ticker, action=txn_type,
+                price=signal.price, weight_traded=0.0, reason="DUPLICATE_BLOCKED",
+                fill_status="SKIPPED",
+            )
+
         order_id: Optional[str] = None
         fill_price = signal.price
+        realized_qty = qty
+        fill_status = "UNKNOWN"
+
         if self.dry_run:
             logger.info(
                 "[DRY_RUN] %s %s qty=%d @ %.2f (weight=%.3f, reason=%s)",
                 txn_type, signal.ticker, qty, signal.price,
                 signal.target_weight, signal.reason,
             )
+            realized_qty = qty
+            fill_status = "DRY_RUN"
         else:
-            order_id = self._place_with_retry(signal.ticker, txn_type, qty, signal.price)
+            order_id = self._place_with_retry(signal.ticker, txn_type, qty, signal.price, signal.reason)
             if order_id:
                 try:
                     actual_price, filled_qty, status = self.wait_for_fill(order_id)
+                    fill_status = status
                     if status == "COMPLETE" and actual_price is not None:
                         fill_price = actual_price
+                        realized_qty = filled_qty
+                    elif status == "PARTIAL":
+                        fill_price = actual_price if actual_price else signal.price
+                        realized_qty = filled_qty
+                        self._cancel_pending(order_id)
+                        if self._notifier:
+                            self._notifier.notify_error(
+                                f"PARTIAL FILL: {txn_type} {signal.ticker} "
+                                f"filled {filled_qty}/{qty} (order_id={order_id})"
+                            )
                     elif status == "REJECTED":
+                        realized_qty = 0
                         logger.error("Order REJECTED: %s %s order_id=%s", txn_type, signal.ticker, order_id)
                         if self._notifier:
                             self._notifier.notify_error(
                                 f"Order REJECTED: {txn_type} {signal.ticker} (order_id={order_id})"
                             )
-                    elif status == "PARTIAL":
-                        logger.warning(
-                            "PARTIAL fill: %s %s filled_qty=%d order_id=%s",
-                            txn_type, signal.ticker, filled_qty, order_id,
-                        )
                 except OrderTimeoutError:
+                    fill_status = "TIMEOUT"
                     logger.warning("Fill confirmation timed out for %s order_id=%s", signal.ticker, order_id)
+            else:
+                fill_status = "REJECTED"
+                realized_qty = 0
 
-        cost = abs(signal.target_weight - signal.current_weight) * (self.one_way_cost + self.slippage)
+        realized_weight = (realized_qty * fill_price) / portfolio_value if portfolio_value > 0 else 0.0
+        cost = realized_weight * (self.one_way_cost + self.slippage)
+
+        self._orders_placed_today.add(dedup_key)
 
         return TradeRecord(
             date=datetime.now(),
             ticker=signal.ticker,
             action=txn_type,
             price=fill_price,
-            weight_traded=abs(signal.target_weight - signal.current_weight),
+            weight_traded=realized_weight,
             reason=signal.reason,
             order_id=order_id,
             costs=cost,
+            filled_qty=realized_qty,
+            requested_qty=qty,
+            fill_status=fill_status,
         )
 
     def place_orders(
@@ -124,15 +169,21 @@ class OrderManager:
         signals: list[Signal],
         portfolio_value: float,
     ) -> list[TradeRecord]:
-        """Place orders for a list of signals. Sells first, then buys."""
+        """Place orders for a list of signals. Sells first, then buys.
+
+        Orders whose notional value exceeds max_slice_value are
+        automatically routed through place_order_sliced().
+        """
         sell_signals = [s for s in signals if s.action in (OrderAction.SELL, OrderAction.REBAL_EXIT)]
         buy_signals = [s for s in signals if s.action == OrderAction.BUY]
 
         records: list[TradeRecord] = []
-        for sig in sell_signals:
-            records.append(self.place_order(sig, portfolio_value))
-        for sig in buy_signals:
-            records.append(self.place_order(sig, portfolio_value))
+        for sig in sell_signals + buy_signals:
+            order_value = sig.target_weight * portfolio_value
+            if order_value > self.max_slice_value:
+                records.extend(self.place_order_sliced(sig, portfolio_value))
+            else:
+                records.append(self.place_order(sig, portfolio_value))
 
         return records
 
@@ -230,6 +281,90 @@ class OrderManager:
     # Helpers
     # ------------------------------------------------------------------
 
+    def place_order_sliced(
+        self,
+        signal: Signal,
+        portfolio_value: float,
+        adv_value: float | None = None,
+        freeze_qty: int | None = None,
+    ) -> list[TradeRecord]:
+        """Split large orders into slices based on ADV and freeze qty limits."""
+        total_qty = self._weight_to_qty(signal.target_weight, signal.price, portfolio_value)
+        if total_qty <= 0:
+            total_qty = 1
+
+        max_slice = self._compute_max_slice(signal.price, adv_value, freeze_qty)
+
+        if total_qty <= max_slice:
+            return [self.place_order(signal, portfolio_value)]
+
+        slices = []
+        remaining = total_qty
+        while remaining > 0:
+            chunk = min(remaining, max_slice)
+            slices.append(chunk)
+            remaining -= chunk
+
+        logger.info(
+            "Splitting %s %s qty=%d into %d slices (max_slice=%d)",
+            signal.action.value if hasattr(signal.action, "value") else signal.action,
+            signal.ticker, total_qty, len(slices), max_slice,
+        )
+
+        records: list[TradeRecord] = []
+        filled_so_far = 0
+        for i, slice_qty in enumerate(slices):
+            slice_weight = (slice_qty * signal.price) / portfolio_value if portfolio_value > 0 else 0.0
+            sub_signal = Signal(
+                ticker=signal.ticker,
+                action=signal.action,
+                target_weight=signal.current_weight + slice_weight if signal.action == OrderAction.BUY else signal.current_weight - slice_weight,
+                current_weight=signal.current_weight,
+                price=signal.price,
+                reason=f"{signal.reason} [slice {i+1}/{len(slices)}]",
+            )
+            tr = self.place_order(sub_signal, portfolio_value)
+            records.append(tr)
+            filled_so_far += tr.filled_qty
+
+            if tr.fill_status in ("REJECTED", "TIMEOUT"):
+                logger.warning("Slice %d/%d failed for %s -- aborting remaining slices", i+1, len(slices), signal.ticker)
+                break
+
+            if i < len(slices) - 1:
+                time.sleep(self.slice_delay)
+
+        return records
+
+    def _compute_max_slice(self, price: float, adv_value: float | None, freeze_qty: int | None) -> int:
+        """Compute max order qty from ADV participation, freeze limits, and value cap."""
+        limits: list[int] = []
+
+        if adv_value and adv_value > 0 and price > 0:
+            limits.append(int(adv_value * self.max_participation_rate / price))
+
+        if price > 0:
+            limits.append(int(self.max_slice_value / price))
+
+        if freeze_qty and freeze_qty > 0:
+            limits.append(int(freeze_qty * self.freeze_qty_buffer))
+
+        if not limits:
+            return 50000
+        return max(1, min(limits))
+
+    def _cancel_pending(self, order_id: str) -> None:
+        """Cancel remaining quantity on a partially filled order."""
+        if self.dry_run:
+            return
+        try:
+            kite = get_kite()
+            _rate_limit()
+            kite.cancel_order(variety="regular", order_id=order_id)
+            logger.info("Cancelled pending remainder of order %s", order_id)
+        except Exception as exc:
+            logger.warning("Failed to cancel order %s: %s", order_id, exc)
+
     def _weight_to_qty(self, weight: float, price: float, portfolio_value: float) -> int:
         if price <= 0 or weight <= 0:
             return 0
@@ -241,6 +376,7 @@ class OrderManager:
         txn_type: str,
         qty: int,
         price: float,
+        reason: str = "",
     ) -> Optional[str]:
         """Attempt order placement with retries on transient failure."""
         kite = get_kite()
@@ -260,7 +396,10 @@ class OrderManager:
             if txn_type == "BUY":
                 limit_price = round(price * (1 + self.limit_buffer_pct), 2)
             else:
-                limit_price = round(price * (1 - self.limit_buffer_pct), 2)
+                extra_slippage = 0.0
+                if reason and "stop" in reason.lower():
+                    extra_slippage = self.cfg.get("exits", {}).get("stop_exit_slippage", 0.005)
+                limit_price = round(price * (1 - self.limit_buffer_pct - extra_slippage), 2)
             order_params["order_type"] = kite.ORDER_TYPE_LIMIT
             order_params["price"] = limit_price
 
@@ -274,8 +413,14 @@ class OrderManager:
                 )
                 return order_id
             except Exception as exc:
+                exc_type = type(exc).__name__
+                non_retryable = ("InputException", "TokenException", "PermissionException")
+                if exc_type in non_retryable:
+                    logger.error("Non-retryable order error for %s %s: %s", txn_type, symbol, exc)
+                    return None
+
                 logger.warning(
-                    "Order attempt %d failed for %s %s: %s",
+                    "Transient order error (attempt %d) for %s %s: %s",
                     attempt, txn_type, symbol, exc,
                 )
                 if attempt < self.max_retries:

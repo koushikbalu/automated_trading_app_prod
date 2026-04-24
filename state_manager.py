@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from contextlib import contextmanager
 from datetime import datetime, date
 from typing import Optional
 
@@ -25,6 +26,7 @@ from sqlalchemy import (
     String,
     Text,
     create_engine,
+    func,
 )
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
@@ -72,6 +74,9 @@ class TradeRow(Base):
     costs = Column(Float, nullable=False, default=0.0)
     holding_days = Column(Integer, nullable=True)
     pnl_pct = Column(Float, nullable=True)
+    filled_qty = Column(Integer, nullable=True)
+    requested_qty = Column(Integer, nullable=True)
+    fill_status = Column(String(16), nullable=True)
 
 
 class PortfolioStateRow(Base):
@@ -85,6 +90,7 @@ class PortfolioStateRow(Base):
     cash_weight = Column(Float, nullable=False, default=1.0)
     exposure = Column(Float, nullable=False, default=0.0)
     positions_count = Column(Integer, nullable=False, default=0)
+    capital_injections_total = Column(Float, nullable=True, default=0.0)
 
 
 class RegimeHistoryRow(Base):
@@ -143,12 +149,25 @@ class StateManager:
 
     def __init__(self, db_url: str | None = None):
         url = db_url or _resolve_db_url()
-        self.engine = create_engine(url, echo=False)
+        self.engine = create_engine(url, echo=False, pool_size=5, max_overflow=10, pool_pre_ping=True)
         Base.metadata.create_all(self.engine)
         self._Session = sessionmaker(bind=self.engine)
 
     def _session(self) -> Session:
         return self._Session()
+
+    @contextmanager
+    def transaction(self):
+        """Atomic batch operations -- commit on success, rollback on error."""
+        session = self._Session()
+        try:
+            yield session
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+        finally:
+            session.close()
 
     # -- Positions ---------------------------------------------------------
 
@@ -230,6 +249,9 @@ class StateManager:
                 costs=trade.costs,
                 holding_days=trade.holding_days,
                 pnl_pct=trade.pnl_pct,
+                filled_qty=trade.filled_qty,
+                requested_qty=trade.requested_qty,
+                fill_status=trade.fill_status,
             ))
             s.commit()
 
@@ -267,6 +289,7 @@ class StateManager:
                 cash_weight=snap.cash_weight,
                 exposure=snap.exposure,
                 positions_count=snap.positions_count,
+                capital_injections_total=snap.capital_injections_total,
             ))
             s.commit()
 
@@ -287,6 +310,7 @@ class StateManager:
                 cash_weight=row.cash_weight,
                 exposure=row.exposure,
                 positions_count=row.positions_count,
+                capital_injections_total=row.capital_injections_total or 0.0,
             )
 
     # -- Regime history ----------------------------------------------------
@@ -365,3 +389,50 @@ class StateManager:
         with self._session() as s:
             s.query(StoppedOutRow).filter(StoppedOutRow.month_year == month_year).delete()
             s.commit()
+
+    # -- Snapshot query by date --------------------------------------------
+
+    def load_snapshot_for_date(self, d: date) -> Optional[PortfolioSnapshot]:
+        """Load the latest snapshot for a given calendar date."""
+        day_start = datetime.combine(d, datetime.min.time())
+        day_end = datetime.combine(d, datetime.max.time())
+        with self._session() as s:
+            row = (
+                s.query(PortfolioStateRow)
+                .filter(
+                    PortfolioStateRow.date >= day_start,
+                    PortfolioStateRow.date <= day_end,
+                )
+                .order_by(PortfolioStateRow.date.desc())
+                .first()
+            )
+            if not row:
+                return None
+            return PortfolioSnapshot(
+                date=row.date,
+                portfolio_value=row.portfolio_value,
+                portfolio_peak=row.portfolio_peak,
+                circuit_breaker_active=row.circuit_breaker_active,
+                cash_weight=row.cash_weight,
+                exposure=row.exposure,
+                positions_count=row.positions_count,
+                capital_injections_total=row.capital_injections_total or 0.0,
+            )
+
+    # -- Trade fill status update (for webhook) ----------------------------
+
+    def update_trade_fill_status(self, order_id: str, status: str, filled_qty: int) -> None:
+        """Update fill status for a trade by order_id (from Kite webhook)."""
+        with self._session() as s:
+            row = (
+                s.query(TradeRow)
+                .filter(TradeRow.order_id == order_id)
+                .order_by(TradeRow.date.desc())
+                .first()
+            )
+            if row:
+                row.fill_status = status
+                row.filled_qty = filled_qty
+                s.commit()
+            else:
+                logger.warning("Webhook: no trade found for order_id=%s", order_id)

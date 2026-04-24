@@ -35,7 +35,7 @@ exits:
   atr_window: 14
   atr_multiple: 2.0
   max_loss_pct: -0.08                 # hard 8% stop from entry
-  max_hold_losing_days: 5             # exit if underwater 5 consecutive days
+  max_hold_losing_days: 0             # 0 = disabled; ATR trailing stop + hard stop provide sufficient protection
   stop_exit_slippage: 0.005           # 0.5% extra slippage on stop-triggered exits
   use_50dma_exit: false
 
@@ -88,6 +88,17 @@ schedule:
   yearly_report_time: "10:00"          # Jan 1
   yearly_report_month: 1
   yearly_report_day: 1
+
+# ---- Execution (Large Order Handling) ----
+execution:
+  max_participation_rate: 0.05   # max 5% of ADV per order
+  max_slice_value: 2500000       # 25 lakh per slice
+  slice_delay_seconds: 30        # gap between slices
+  freeze_qty_buffer: 0.90        # use 90% of NSE freeze qty limit
+
+# ---- API Authentication ----
+api:
+  auth_token: "${API_AUTH_TOKEN}"
 
 # ---- Broker (Zerodha Kite Connect) ----
 broker:

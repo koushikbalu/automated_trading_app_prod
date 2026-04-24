@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from pathlib import Path
 
 import yaml
@@ -80,16 +81,21 @@ class TokenManager:
             logger.warning("Token validation failed: %s", exc)
             return False
 
-    def refresh_token(self) -> bool:
-        """Validate the token; if invalid, send Telegram alert.
+    def refresh_token(self, max_retries: int = 3) -> bool:
+        """Validate the token with retries; if still invalid, send Telegram alert.
 
         Returns True if the token is valid, False if expired/invalid.
         """
-        if self.validate_token():
-            return True
+        for attempt in range(max_retries):
+            if self.validate_token():
+                return True
+            if attempt < max_retries - 1:
+                wait = 5 * (attempt + 1)
+                logger.info("Token validation attempt %d failed, retrying in %ds...", attempt + 1, wait)
+                time.sleep(wait)
 
         login_url = f"https://kite.zerodha.com/connect/login?v=3&api_key={self.api_key}"
-        logger.warning("Token expired. Login URL: %s", login_url)
+        logger.warning("Token expired after %d attempts. Login URL: %s", max_retries, login_url)
         self.notifier.notify_token_expiry(login_url)
         return False
 
