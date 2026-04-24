@@ -1,0 +1,84 @@
+Deployment Steps for Production (EC2)
+This is a reusable checklist. It applies to these changes and any future code updates.
+
+Prerequisites
+Your EC2 instance (t3.small, ap-south-1) is already running with Docker, Docker Compose, and the .env file configured.
+The app code lives at ~/trading-app/automated_trading_app on the EC2.
+GitHub remote: https://github.com/koushikbalu/automated_trading_app_prod.git
+
+Step 1: Commit and push from your local machine (Windows)
+# From: c:\Users\Koushik.B\Desktop\project\personal\automated_trading_app_prod
+# Review what changed
+git status
+git diff
+# Stage and commit
+git add -A
+git commit -m "Fix CB peak reset, schedule token check, add pool_pre_ping, log rotation, auto-slicing, dedup orders, trade PnL"
+# Push to GitHub
+git push origin main
+
+Step 2: SSH into your EC2 instance
+ssh -i /path/to/your-key.pem ec2-user@<your-ec2-ip>
+
+Step 3: Pull latest code on EC2
+cd ~/trading-app/automated_trading_app
+git pull origin main
+
+Step 4: Run Alembic migrations (if any new DB schema changes)
+For this deployment, no new migration is needed -- the changes are all in-memory logic, connection pool settings, and logging. But for future deployments that touch models.py or state_manager.py tables:
+
+source .env
+export DATABASE_URL
+alembic upgrade head
+
+You can verify the current migration state with:
+alembic current
+
+Step 5: Rebuild and restart containers
+# Rebuild images with new code, then restart (zero-downtime isn't needed since
+# the scheduler and API restart within seconds)
+sudo docker compose up -d --build
+This rebuilds both the scheduler and api containers from the Dockerfile, installing any new dependencies from requirements.txt and copying in the updated Python files.
+
+Step 6: Verify the deployment
+# Watch logs for startup errors (Ctrl+C to exit)
+sudo docker compose logs -f --tail=50
+# Health check (should return {"status": "ok", ...})
+curl http://localhost:8000/health
+# Check both containers are running
+sudo docker compose ps
+
+Step 7: Verify specific fixes (one-time for this deployment)
+# Confirm the new token_check job is scheduled (look for "Periodic token re-validation" in logs)
+sudo docker compose logs scheduler | grep "token_check"
+# Confirm log rotation is active (log file should exist, no errors)
+sudo docker compose exec scheduler ls -la /app/automated_trading.log
+# Confirm pool_pre_ping is active (no errors about stale DB connections)
+sudo docker compose logs scheduler | grep "Portfolio synced"
+
+Quick Reference: Future Deployment Cheat Sheet
+# === LOCAL (Windows / your dev machine) ===
+cd c:\Users\Koushik.B\Desktop\project\personal\automated_trading_app_prod
+git add -A
+git commit -m "describe your changes"
+git push origin main
+# === EC2 (SSH into your server) ===
+cd ~/trading-app/automated_trading_app
+git pull origin main
+source .env && export DATABASE_URL && alembic upgrade head   # only if DB schema changed
+sudo docker compose up -d --build
+sudo docker compose logs -f --tail=50                        # verify startup
+curl http://localhost:8000/health                            # verify health
+
+Rollback (if something goes wrong)
+# On EC2: revert to the previous commit
+cd ~/trading-app/automated_trading_app
+git log --oneline -5                    # find the commit to revert to
+git checkout <previous-commit-hash> .   # restore files (keeps you on main)
+sudo docker compose up -d --build       # rebuild with old code
+
+When is alembic upgrade head needed?
+Only when a new file is added under alembic/versions/. For this deployment, the three existing migrations (001_initial_tables, 002_add_position_fields, 003_add_fill_tracking) should already be applied from prior runs. None of the seven fixes in this deployment change the database schema, so you can skip the migration step this time.
+
+Important timing note
+The scheduler container runs your trading jobs. Deploy outside market hours (before 9:00 AM IST or after 4:00 PM IST) to avoid interrupting an active monitor_stops or check_pyramid cycle. The containers restart in ~5-10 seconds, but a mid-trade restart could leave a partially processed cycle.

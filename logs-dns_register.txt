@@ -1,0 +1,64 @@
+[ec2-user@ip-172-31-42-111 ~]$ sudo tee /etc/nginx/conf.d/trading.conf << 'EOF'
+server {
+    listen 80;
+    server_name momentum-trading.online;
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+EOF
+server {
+    listen 80;
+    server_name momentum-trading.online;
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+[ec2-user@ip-172-31-42-111 ~]$ sudo nginx -t
+nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
+nginx: configuration file /etc/nginx/nginx.conf test is successful
+[ec2-user@ip-172-31-42-111 ~]$ sudo systemctl reload nginx
+[ec2-user@ip-172-31-42-111 ~]$ curl http://momentum-trading.online/health
+{"status":"ok","timestamp":"2026-04-22T07:27:35.379762","db_connected":true,"token_valid":true,"last_stop_check":null,"last_rebalance":null,"portfolio_value":20000000,"exposure":0,"positions_count":0,"circuit_breaker_active":false}[ec2-user@ip-172-31-42-111 ~]$
+[ec2-user@ip-172-31-42-111 ~]$
+[ec2-user@ip-172-31-42-111 ~]$ sudo certbot --nginx -d momentum-trading.online --non-interactive --agree-tos -m koushikkannanb1228@gmail.com
+Saving debug log to /var/log/letsencrypt/letsencrypt.log
+Python 3.9 support will be dropped in the next planned release of Certbot - please upgrade your Python version.
+Requesting a certificate for momentum-trading.online
+
+Successfully received certificate.
+Certificate is saved at: /etc/letsencrypt/live/momentum-trading.online/fullchain.pem
+Key is saved at:         /etc/letsencrypt/live/momentum-trading.online/privkey.pem
+This certificate expires on 2026-07-21.
+These files will be updated when the certificate renews.
+
+Deploying certificate
+Successfully deployed certificate for momentum-trading.online to /etc/nginx/conf.d/trading.conf
+Congratulations! You have successfully enabled HTTPS on https://momentum-trading.online
+
+NEXT STEPS:
+- The certificate will need to be renewed before it expires. Certbot can automatically renew the certificate in the background, but you may need to take steps to enable that functionality. See https://certbot.org/renewal-setup for instructions.
+
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+If you like Certbot, please consider supporting our work by:
+ * Donating to ISRG / Let's Encrypt:   https://letsencrypt.org/donate
+ * Donating to EFF:                    https://eff.org/donate-le
+- - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - -
+[ec2-user@ip-172-31-42-111 ~]$
+[ec2-user@ip-172-31-42-111 ~]$
+[ec2-user@ip-172-31-42-111 ~]$
+[ec2-user@ip-172-31-42-111 ~]$ echo "0 3 * * * root certbot renew --quiet" | sudo tee /etc/cron.d/certbot-renew
+tee: /etc/cron.d/certbot-renew: No such file or directory
+0 3 * * * root certbot renew --quiet
+[ec2-user@ip-172-31-42-111 ~]$
+[ec2-user@ip-172-31-42-111 ~]$
+[ec2-user@ip-172-31-42-111 ~]$ curl https://momentum-trading.online/health
+{"status":"ok","timestamp":"2026-04-22T07:28:28.408056","db_connected":true,"token_valid":true,"last_stop_check":null,"last_rebalance":null,"portfolio_value":20000000,"exposure":0,"positions_count":0,"circuit_breaker_active":false}[ec2-user@ip-172-31-42-111 ~]$

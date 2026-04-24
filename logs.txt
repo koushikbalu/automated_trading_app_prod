@@ -1,0 +1,181 @@
+ main.py | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$ sudo docker compose up -d --build
+[+] Building 1.8s (17/20)
+ => [internal] load local bake definitions                                                                                                                                                                    0.0s
+ => => reading from stdin 1.06kB                                                                                                                                                                              0.0s
+ => [api internal] load build definition from Dockerfile                                                                                                                                                      0.0s
+ => => transferring dockerfile: 296B                                                                                                                                                                          0.0s
+ => [scheduler internal] load build definition from Dockerfile                                                                                                                                                0.0s
+ => => transferring dockerfile: 296B                                                                                                                                                                          0.0s
+ => [api internal] load metadata for docker.io/library/python:3.12-slim                                                                                                                                       1.1s
+ => [scheduler internal] load .dockerignore                                                                                                                                                                   0.0s
+ => => transferring context: 2B                                                                                                                                                                               0.0s
+ => [api internal] load .dockerignore                                                                                                                                                                         0.0s
+ => => transferring context: 2B                                                                                                                                                                               0.0s
+ => [api 1/5] FROM docker.io/library/python:3.12-slim@sha256:804ddf3251a60bbf9c92e73b7566c40428d54d0e79d3428194edf40da6521286                                                                                 0.0s
+ => [scheduler internal] load build context                                                                                                                                                                   0.0s
+ => => transferring context: 31.99kB                                                                                                                                                                          0.0s
+ => [api internal] load build context                                                                                                                                                                         0.0s
+ => => transferring context: 31.99kB                                                                                                                                                                          0.0s
+ => CACHED [scheduler 2/5] WORKDIR /app                                                                                                                                                                       0.0s
+ => CACHED [scheduler 3/5] COPY requirements.txt .                                                                                                                                                            0.0s
+ => CACHED [scheduler 4/5] RUN pip install --no-cache-dir -r requirements.txt                                                                                                                                 0.0s
+ => [scheduler 5/5] COPY . .                                                                                                                                                                                  0.2s
+ => [scheduler] exporting to image                                                                                                                                                                            0.1s
+ => => exporting layers                                                                                                                                                                                       0.1s
+ => => writing image sha256:626dfb42fd7db52728cb99c9339e06c2e5de412e38fb7ecf36a6778b97924cf7                                                                                                                  0.0s
+ => => naming to docker.io/library/automated_trading_app_prod-scheduler                                                                                                                                       0.0s
+ => [api] exporting to image                                                                                                                                                                                  0.1s
+ => => exporting layers                                                                                                                                                                                       0.1s
+ => => writing image sha256:a51a585fd0ad43216720ff12b73418b9bfdefd231054062b717ccfc5529ffdb8                                                                                                                  0.0s
+ => => naming to docker.io/library/automated_trading_app_prod-api                                                                                                                                             0.0s
+ => [scheduler] resolving provenance for metadata file                                                                                                                                                        0.0s
+ => [api] resolving provenance for metadata file                                                                                                                                                              0.0s
+[+] up 4/4
+ ✔ Image automated_trading_app_prod-api             Built                                                                                                                                                      1.9s
+ ✔ Image automated_trading_app_prod-scheduler       Built                                                                                                                                                      1.9s
+ ✔ Container automated_trading_app_prod-api-1       Started                                                                                                                                                    1.6s
+ ✔ Container automated_trading_app_prod-scheduler-1 Started                                                                                                                                                    1.6s
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$ sudo docker compose ps
+NAME                                     IMAGE                                  COMMAND                  SERVICE     CREATED          STATUS                         PORTS
+automated_trading_app_prod-api-1         automated_trading_app_prod-api         "uvicorn api:app --h…"   api         14 seconds ago   Up 11 seconds                  0.0.0.0:8000->8000/tcp, [::]:8000->8000/tcp
+automated_trading_app_prod-scheduler-1   automated_trading_app_prod-scheduler   "python main.py run"     scheduler   14 seconds ago   Restarting (1) 3 seconds ago
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$ sudo docker compose ps
+NAME                                     IMAGE                                  COMMAND                  SERVICE     CREATED          STATUS                         PORTS
+automated_trading_app_prod-api-1         automated_trading_app_prod-api         "uvicorn api:app --h…"   api         28 seconds ago   Up 25 seconds                  0.0.0.0:8000->8000/tcp, [::]:8000->8000/tcp
+automated_trading_app_prod-scheduler-1   automated_trading_app_prod-scheduler   "python main.py run"     scheduler   28 seconds ago   Restarting (1) 6 seconds ago
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$ sudo docker compose logs scheduler --tail 50
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/click/core.py:2858 in __init__       │
+scheduler-1  | ╰──────────────────────────────────────────────────────────────────────────────╯
+scheduler-1  | TypeError: Secondary flag is not valid for non-boolean flag.
+scheduler-1  | ╭───────────────────── Traceback (most recent call last) ──────────────────────╮
+scheduler-1  | │ /app/main.py:380 in <module>                                                 │
+scheduler-1  | │                                                                              │
+scheduler-1  | │   377                                                                        │
+scheduler-1  | │   378                                                                        │
+scheduler-1  | │   379 if __name__ == "__main__":                                             │
+scheduler-1  | │ ❱ 380 │   app()                                                              │
+scheduler-1  | │   381                                                                        │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ ╭───────────────────────────────── locals ─────────────────────────────────╮ │
+scheduler-1  | │ │ annotations = _Feature((3, 7, 0, 'beta', 1), None, 16777216)             │ │
+scheduler-1  | │ │         app = <typer.main.Typer object at 0x7f0251c7f170>                │ │
+scheduler-1  | │ │     logging = <module 'logging' from                                     │ │
+scheduler-1  | │ │               '/usr/local/lib/python3.12/logging/__init__.py'>           │ │
+scheduler-1  | │ │  signal_mod = <module 'signal' from                                      │ │
+scheduler-1  | │ │               '/usr/local/lib/python3.12/signal.py'>                     │ │
+scheduler-1  | │ │         sys = <module 'sys' (built-in)>                                  │ │
+scheduler-1  | │ │       typer = <module 'typer' from                                       │ │
+scheduler-1  | │ │               '/usr/local/lib/python3.12/site-packages/typer/__init__.p… │ │
+scheduler-1  | │ │        yaml = <module 'yaml' from                                        │ │
+scheduler-1  | │ │               '/usr/local/lib/python3.12/site-packages/yaml/__init__.py… │ │
+scheduler-1  | │ ╰──────────────────────────────────────────────────────────────────────────╯ │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/typer/main.py:338 in __call__        │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/typer/main.py:321 in __call__        │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/typer/main.py:360 in get_command     │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/typer/main.py:342 in get_group       │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/typer/main.py:496 in                 │
+scheduler-1  | │ get_group_from_info                                                          │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/typer/main.py:590 in                 │
+scheduler-1  | │ get_command_from_info                                                        │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/typer/main.py:566 in                 │
+scheduler-1  | │ get_params_convertors_ctx_param_name_from_function                           │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/typer/main.py:900 in get_click_param │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/typer/core.py:427 in __init__        │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/click/core.py:2858 in __init__       │
+scheduler-1  | ╰──────────────────────────────────────────────────────────────────────────────╯
+scheduler-1  | TypeError: Secondary flag is not valid for non-boolean flag.
+
+
+
+
+
+
+
+
+
+
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$ sudo docker compose build --no-cache scheduler
+[+] Building 48.5s (12/12) FINISHED
+ => [internal] load local bake definitions                                                                                                                                                                    0.0s
+ => => reading from stdin 608B                                                                                                                                                                                0.0s
+ => [internal] load build definition from Dockerfile                                                                                                                                                          0.0s
+ => => transferring dockerfile: 296B                                                                                                                                                                          0.0s
+ => [internal] load metadata for docker.io/library/python:3.12-slim                                                                                                                                           0.7s
+ => [internal] load .dockerignore                                                                                                                                                                             0.0s
+ => => transferring context: 2B                                                                                                                                                                               0.0s
+ => [1/5] FROM docker.io/library/python:3.12-slim@sha256:804ddf3251a60bbf9c92e73b7566c40428d54d0e79d3428194edf40da6521286                                                                                     0.0s
+ => [internal] load build context                                                                                                                                                                             0.0s
+ => => transferring context: 9.48kB                                                                                                                                                                           0.0s
+ => CACHED [2/5] WORKDIR /app                                                                                                                                                                                 0.0s
+ => [3/5] COPY requirements.txt .                                                                                                                                                                             0.1s
+ => [4/5] RUN pip install --no-cache-dir -r requirements.txt                                                                                                                                                 35.5s
+ => [5/5] COPY . .                                                                                                                                                                                            0.3s
+ => exporting to image                                                                                                                                                                                       11.5s
+ => => exporting layers                                                                                                                                                                                      11.5s
+ => => writing image sha256:16e17525184dffe7365d358dbc819e3516eb1bb8d04abc0f5056890287901f16                                                                                                                  0.0s
+ => => naming to docker.io/library/automated_trading_app_prod-scheduler                                                                                                                                       0.0s
+ => resolving provenance for metadata file                                                                                                                                                                    0.1s
+[+] build 1/1
+ ✔ Image automated_trading_app_prod-scheduler Built                                                                                                                                                           48.6s
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$ sudo docker compose up -d
+[+] up 2/2
+ ✔ Container automated_trading_app_prod-api-1       Running                                                                                                                                                    0.0s
+ ✔ Container automated_trading_app_prod-scheduler-1 Started                                                                                                                                                    0.7s
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$ sudo docker compose up -d
+[+] up 2/2
+ ✔ Container automated_trading_app_prod-api-1       Running                                                                                                                                                    0.0s
+ ✔ Container automated_trading_app_prod-scheduler-1 Started                                                                                                                                                    0.0s
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$ sudo docker compose ps
+NAME                                     IMAGE                                  COMMAND                  SERVICE     CREATED          STATUS                         PORTS
+automated_trading_app_prod-api-1         automated_trading_app_prod-api         "uvicorn api:app --h…"   api         3 minutes ago    Up 3 minutes                   0.0.0.0:8000->8000/tcp, [::]:8000->8000/tcp
+automated_trading_app_prod-scheduler-1   automated_trading_app_prod-scheduler   "python main.py run"     scheduler   18 seconds ago   Restarting (1) 4 seconds ago
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$ sudo docker compose up -d
+[+] up 2/2
+ ✔ Container automated_trading_app_prod-api-1       Running                                                                                                                                                    0.0s
+ ✔ Container automated_trading_app_prod-scheduler-1 Started                                                                                                                                                    0.0s
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$ sudo docker compose logs scheduler --tail 20
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/typer/main.py:360 in get_command     │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/typer/main.py:342 in get_group       │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/typer/main.py:496 in                 │
+scheduler-1  | │ get_group_from_info                                                          │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/typer/main.py:590 in                 │
+scheduler-1  | │ get_command_from_info                                                        │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/typer/main.py:566 in                 │
+scheduler-1  | │ get_params_convertors_ctx_param_name_from_function                           │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/typer/main.py:900 in get_click_param │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/typer/core.py:427 in __init__        │
+scheduler-1  | │                                                                              │
+scheduler-1  | │ /usr/local/lib/python3.12/site-packages/click/core.py:2858 in __init__       │
+scheduler-1  | ╰──────────────────────────────────────────────────────────────────────────────╯
+scheduler-1  | TypeError: Secondary flag is not valid for non-boolean flag.
+[ec2-user@ip-172-31-42-111 automated_trading_app_prod]$
